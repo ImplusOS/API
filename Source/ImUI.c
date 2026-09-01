@@ -36,6 +36,24 @@ static void *imui_realloc_sized(void *p, size_t o, size_t n) {
 #include "Header/stb_truetype.h"
 #pragma GCC diagnostic pop
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wshadow"
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_NO_STDIO
+#define STBI_NO_SIMD
+#define STBI_NO_THREAD_LOCALS
+#define STBI_ONLY_PNG
+#define STBI_MALLOC(z)              malloc(z)
+#define STBI_REALLOC(p, z)          imui_realloc_sized(p, 0, z)
+#define STBI_REALLOC_SIZED(p, o, z) imui_realloc_sized(p, o, z)
+#define STBI_FREE(p)                free(p)
+#include "Header/stb_image.h"
+#pragma GCC diagnostic pop
+
 static stbtt_fontinfo g_font;
 static uint8_t       *g_font_buf;
 static int            g_font_ok;
@@ -207,103 +225,106 @@ static void draw_text(surf_t *s, int x, int y_top, const char *str, float px,
 }
 
 /* ------------------------------------------------------------- icons */
+/*
+ * Icons are the shared external Material Design assets the window manager
+ * ships in Resource/Icons/md/ (white RGBA PNGs); ImUI loads them once and
+ * tints at blit time.
+ */
+#define IMUI_ICON_DIR "/Userland/com.ImplusOS.windowmanager/Resource/Icons/md/"
 
-static void imui_icon(surf_t *s, int x, int y, int sz, imui_icon_t k, uint32_t c)
-{
-#define IX(n) (x + (n) * sz / 24)
-#define IY(n) (y + (n) * sz / 24)
-#define IS(n) ((n) * sz / 24 < 1 ? 1 : (n) * sz / 24)
-    switch (k) {
-    case IMUI_ICON_FOLDER: case IMUI_ICON_FOLDER_OPEN:
-        sround(s, IX(3), IY(6), IS(7), IS(3), IS(1), c);
-        sround(s, IX(3), IY(8), IS(18), IS(12), IS(2), c);
-        break;
-    case IMUI_ICON_FILE: case IMUI_ICON_OPEN:
-        sround(s, IX(5), IY(3), IS(11), IS(18), IS(2), c);
-        sround(s, IX(13), IY(3), IS(5), IS(6), IS(1), (c & 0xFFFFFF) | 0x88000000u);
-        break;
-    case IMUI_ICON_DRIVE:
-        sround(s, IX(3), IY(6), IS(18), IS(12), IS(2), c);
-        sdisc(s, IX(17), IY(12), IS(2), (c & 0xFFFFFF) | 0xAA000000u);
-        break;
-    case IMUI_ICON_BACK:
-        sline(s, IX(15), IY(5), IX(8), IY(12), IS(3), c);
-        sline(s, IX(8), IY(12), IX(15), IY(19), IS(3), c);
-        break;
-    case IMUI_ICON_FORWARD:
-        sline(s, IX(9), IY(5), IX(16), IY(12), IS(3), c);
-        sline(s, IX(16), IY(12), IX(9), IY(19), IS(3), c);
-        break;
-    case IMUI_ICON_UP:
-        sline(s, IX(5), IY(15), IX(12), IY(8), IS(3), c);
-        sline(s, IX(12), IY(8), IX(19), IY(15), IS(3), c);
-        sfill(s, IX(11), IY(8), IS(2), IS(11), c);
-        break;
-    case IMUI_ICON_HOME:
-        sline(s, IX(4), IY(12), IX(12), IY(4), IS(3), c);
-        sline(s, IX(12), IY(4), IX(20), IY(12), IS(3), c);
-        sround(s, IX(7), IY(11), IS(10), IS(10), IS(1), c);
-        break;
-    case IMUI_ICON_REFRESH:
-        for (int a = 40; a < 320; a += 12) {
-            double rad = a * 3.14159 / 180.0;
-            sdisc(s, x + sz / 2 + (int)(cos(rad) * sz * 0.32),
-                     y + sz / 2 + (int)(sin(rad) * sz * 0.32), IS(1), c);
-        }
-        sline(s, IX(17), IY(3), IX(20), IY(9), IS(3), c);
-        break;
-    case IMUI_ICON_NEW:
-        sround(s, IX(5), IY(3), IS(14), IS(18), IS(2), c);
-        sfill(s, IX(11), IY(8), IS(2), IS(9), (c & 0xFFFFFF) | 0xCC000000u);
-        sfill(s, IX(8), IY(11), IS(8), IS(2), (c & 0xFFFFFF) | 0xCC000000u);
-        break;
-    case IMUI_ICON_SAVE:
-        sround(s, IX(4), IY(4), IS(16), IS(16), IS(2), c);
-        sfill(s, IX(8), IY(4), IS(8), IS(6), (c & 0xFFFFFF) | 0x99000000u);
-        sround(s, IX(8), IY(13), IS(8), IS(6), IS(1), (c & 0xFFFFFF) | 0x99000000u);
-        break;
-    case IMUI_ICON_SEARCH:
-        for (int a = 0; a < 360; a += 8) {
-            double rad = a * 3.14159 / 180.0;
-            sdisc(s, x + sz * 10 / 24 + (int)(cos(rad) * sz * 0.28),
-                     y + sz * 10 / 24 + (int)(sin(rad) * sz * 0.28), IS(1), c);
-        }
-        sline(s, IX(15), IY(15), IX(20), IY(20), IS(3), c);
-        break;
-    case IMUI_ICON_TRASH:
-        sround(s, IX(6), IY(6), IS(12), IS(15), IS(1), c);
-        sfill(s, IX(4), IY(4), IS(16), IS(2), c);
-        break;
-    case IMUI_ICON_COPY:
-        sround(s, IX(4), IY(4), IS(12), IS(12), IS(1), c);
-        sround(s, IX(9), IY(9), IS(12), IS(12), IS(1), c);
-        break;
-    case IMUI_ICON_CUT:
-        sdisc(s, IX(7), IY(17), IS(3), c); sdisc(s, IX(17), IY(17), IS(3), c);
-        sline(s, IX(7), IY(17), IX(19), IY(4), IS(2), c);
-        sline(s, IX(17), IY(17), IX(5), IY(4), IS(2), c);
-        break;
-    case IMUI_ICON_PASTE:
-        sround(s, IX(5), IY(4), IS(14), IS(17), IS(2), c);
-        sfill(s, IX(9), IY(2), IS(6), IS(4), c);
-        break;
-    case IMUI_ICON_EDIT:
-        sline(s, IX(4), IY(20), IX(16), IY(8), IS(4), c);
-        sround(s, IX(15), IY(4), IS(5), IS(5), IS(1), c);
-        break;
-    case IMUI_ICON_CHECK:
-        sline(s, IX(5), IY(12), IX(10), IY(18), IS(3), c);
-        sline(s, IX(10), IY(18), IX(19), IY(6), IS(3), c);
-        break;
-    case IMUI_ICON_CLOSE:
-        sline(s, IX(6), IY(6), IX(18), IY(18), IS(3), c);
-        sline(s, IX(18), IY(6), IX(6), IY(18), IS(3), c);
-        break;
-    default: break;
+static const char *const imui_icon_file[] = {
+    [IMUI_ICON_FOLDER]      = "folder",
+    [IMUI_ICON_FOLDER_OPEN] = "folder_open",
+    [IMUI_ICON_FILE]        = "description",
+    [IMUI_ICON_DRIVE]       = "storage",
+    [IMUI_ICON_BACK]        = "arrow_back",
+    [IMUI_ICON_FORWARD]     = "arrow_forward",
+    [IMUI_ICON_UP]          = "arrow_upward",
+    [IMUI_ICON_HOME]        = "home",
+    [IMUI_ICON_REFRESH]     = "refresh",
+    [IMUI_ICON_NEW]         = "note_add",
+    [IMUI_ICON_OPEN]        = "file_open",
+    [IMUI_ICON_SAVE]        = "save",
+    [IMUI_ICON_SEARCH]      = "search",
+    [IMUI_ICON_TRASH]       = "delete",
+    [IMUI_ICON_COPY]        = "content_copy",
+    [IMUI_ICON_CUT]         = "content_cut",
+    [IMUI_ICON_PASTE]       = "content_paste",
+    [IMUI_ICON_EDIT]        = "edit",
+    [IMUI_ICON_CHECK]       = "check",
+    [IMUI_ICON_CLOSE]       = "close",
+};
+#define IMUI_ICON_COUNT ((int)(sizeof(imui_icon_file) / sizeof(imui_icon_file[0])))
+
+typedef struct { uint32_t *px; int w, h; int tried; } imui_icon_cache_t;
+static imui_icon_cache_t g_icon_cache[IMUI_ICON_COUNT];
+
+static uint32_t *load_png_rgba(const char *path, int *w, int *h) {
+    file_stat_t st;
+    if (file_stat(path, &st) < 0 || !st.exists || st.is_dir ||
+        st.size == 0 || st.size > 4u * 1024u * 1024u)
+        return NULL;
+    int32_t fd = file_open(path, 0);
+    if (fd < 0) return NULL;
+    uint8_t *enc = malloc(st.size);
+    if (!enc) { file_close(fd); return NULL; }
+    uint32_t got = 0;
+    while (got < st.size) {
+        int64_t n = file_read(fd, enc + got, st.size - got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
     }
-#undef IX
-#undef IY
-#undef IS
+    file_close(fd);
+    if (got != st.size) { free(enc); return NULL; }
+    int c;
+    uint8_t *rgba = stbi_load_from_memory(enc, (int)st.size, w, h, &c, 4);
+    free(enc);
+    if (!rgba) return NULL;
+    uint32_t *out = malloc((size_t)(*w) * (size_t)(*h) * 4);
+    if (!out) { stbi_image_free(rgba); return NULL; }
+    for (int i = 0; i < (*w) * (*h); ++i)
+        out[i] = ((uint32_t)rgba[i*4+3] << 24) | ((uint32_t)rgba[i*4] << 16) |
+                 ((uint32_t)rgba[i*4+1] << 8) | rgba[i*4+2];
+    stbi_image_free(rgba);
+    return out;
+}
+
+static const imui_icon_cache_t *imui_icon_get(imui_icon_t k) {
+    if ((int)k <= 0 || (int)k >= IMUI_ICON_COUNT || !imui_icon_file[k]) return NULL;
+    imui_icon_cache_t *ic = &g_icon_cache[k];
+    if (!ic->tried) {
+        ic->tried = 1;
+        char path[160];
+        snprintf(path, sizeof(path), "%s%s.png", IMUI_ICON_DIR, imui_icon_file[k]);
+        ic->px = load_png_rgba(path, &ic->w, &ic->h);
+    }
+    return ic->px ? ic : NULL;
+}
+
+static void imui_icon(surf_t *s, int x, int y, int sz, imui_icon_t k, uint32_t c) {
+    const imui_icon_cache_t *ic = imui_icon_get(k);
+    if (!ic || sz <= 0) return;
+    uint32_t rgb = c & 0x00FFFFFFu;
+    uint32_t ta = (c >> 24) ? (c >> 24) : 255u;
+    int dn = sz > 1 ? sz - 1 : 1;
+    for (int j = 0; j < sz; ++j) {
+        uint32_t fy = (uint32_t)((int64_t)j * (ic->h - 1) * 65536 / dn);
+        uint32_t y0 = fy >> 16, y1 = y0 + 1 < (uint32_t)ic->h ? y0 + 1 : y0;
+        uint32_t wy = (fy >> 8) & 0xFF;
+        for (int i = 0; i < sz; ++i) {
+            uint32_t fx = (uint32_t)((int64_t)i * (ic->w - 1) * 65536 / dn);
+            uint32_t x0 = fx >> 16, x1 = x0 + 1 < (uint32_t)ic->w ? x0 + 1 : x0;
+            uint32_t wx = (fx >> 8) & 0xFF;
+            uint32_t a00 = ic->px[y0*ic->w + x0] >> 24, a10 = ic->px[y0*ic->w + x1] >> 24;
+            uint32_t a01 = ic->px[y1*ic->w + x0] >> 24, a11 = ic->px[y1*ic->w + x1] >> 24;
+            uint32_t top = a00*(256-wx) + a10*wx;
+            uint32_t bot = a01*(256-wx) + a11*wx;
+            uint32_t sa = (top*(256-wy) + bot*wy) >> 16;
+            if (!sa) continue;
+            uint32_t a = sa * ta / 255u;
+            if (a) sput(s, x + i, y + j, (a << 24) | rgb);
+        }
+    }
 }
 
 /* ------------------------------------------------------------- tree */
