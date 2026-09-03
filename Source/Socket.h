@@ -29,3 +29,8 @@ int32_t socket_set_option(int32_t sockfd, int32_t level,
 int32_t socket_get_option(int32_t sockfd, int32_t level,
                           int32_t option, int32_t *value_out);
 int32_t socket_shutdown(int32_t sockfd, int32_t how);
+
+/* Is anything bound and listening on this AF_UNIX path? A side-effect-free
+ * probe: use it to wait for a server to reach its accept loop rather than
+ * sleeping for a guessed interval. */
+int32_t unix_socket_is_listening(const char *path);

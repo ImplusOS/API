@@ -89,3 +89,19 @@ int64_t display_get_monitor_mode_info(uint32_t monitor_index,
                                       uint32_t mode_index,
                                       display_mode_info_t *out_info);
 int64_t display_set_monitor_mode(uint32_t monitor_index, uint32_t mode_index);
+
+/* ---- KMS scanout redirection --------------------------------------------
+ *
+ * A foreign display server (Xorg through the kernel's /dev/dri/card0 shim)
+ * normally scans out straight to the panel, which the window manager also
+ * owns. Handing it a surface instead makes it composite like any other app:
+ * pass the pixels of a window's backing store, and every X frame lands there
+ * for the WM to draw. `pixels` must be page-aligned -- a WM backing store
+ * always is, because it is a whole shared-memory object.
+ *
+ * pixels == NULL restores direct scanout. Returns 0, or a negative errno. */
+int32_t display_kms_set_mirror(void *pixels, uint32_t width, uint32_t height);
+
+/* 1 (and rearms) if the redirected server has drawn a frame since the last
+ * call, so a client can damage its window only when there is something new. */
+int32_t display_kms_mirror_take_dirty(void);
