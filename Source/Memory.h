@@ -15,6 +15,13 @@ int32_t os_shared_memory_close(int32_t handle);
  * AF_UNIX socket via SCM_RIGHTS), or <0. Map it with
  * os_shared_memory_map(). */
 int32_t os_memfd_shm_handle(int32_t fd);
+/* The inverse: wrap a shared-memory handle this process owns in a memfd fd,
+ * so it can be handed to another process over SCM_RIGHTS (sendmsg). The fd
+ * holds its own reference; <0 on failure. */
+int32_t os_memfd_from_shm(int32_t handle);
+
+/* Bytes reserved for `handle`; a mapping of it is valid up to this. */
+uint32_t os_shared_memory_size(int32_t handle);
 void *memcpy(void *dst, const void *src, size_t n);
 int   memcmp(const void *s1, const void *s2, size_t n);
 void *memset(void *ptr, int value, size_t num);

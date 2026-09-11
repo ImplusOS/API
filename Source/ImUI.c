@@ -715,6 +715,8 @@ static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
         sstroke(s, x, y, cw, ch, focus ? app->c_accent : app->c_border);
         int lh = 18, pad = 8;
         int vis = (ch - 2 * pad) / lh;
+        if (vis < 1) vis = 1;
+        w->ta_vis = (uint32_t)vis;   /* page keys need a screenful; see handle_key */
         /* find caret line/col + total lines */
         uint32_t line = 0, col = 0, cl = 0, cc = 0;
         for (uint32_t i = 0; i < w->buf_len; ++i) {
@@ -797,6 +799,10 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
     if (f->kind == IMUI_TEXTBOX) {
         if (ev->ascii == '\r' || ev->ascii == '\n') {
             if (f->on_submit) f->on_submit(app, f, f->user);
+        } else if (!f->editable) {
+            /* read-only: the caret still moves, nothing types */
+            if (ev->keycode == 0x4B && f->caret > 0) f->caret--;
+            else if (ev->keycode == 0x4D && f->caret < f->buf_len) f->caret++;
         } else if (ev->ascii == 8 || ev->ascii == 127) {
             if (f->caret > 0) {
                 memmove(f->buf + f->caret - 1, f->buf + f->caret, f->buf_len - f->caret + 1);
@@ -813,8 +819,9 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
         app->needs_paint = true;
     } else if (f->kind == IMUI_TEXTAREA) {
         char c = (char)ev->ascii;
-        if (c == '\r' || c == '\n') ta_insert(f, "\n", 1);
-        else if (c == 8 || c == 127) ta_backspace(f);
+        bool ed = f->editable;
+        if (ed && (c == '\r' || c == '\n')) ta_insert(f, "\n", 1);
+        else if (ed && (c == 8 || c == 127)) ta_backspace(f);
         else if (ev->keycode == 0x4B) { if (f->caret > 0) f->caret--; }      /* left */
         else if (ev->keycode == 0x4D) { if (f->caret < f->buf_len) f->caret++; } /* right */
         else if (ev->keycode == 0x48) {                                       /* up */
@@ -824,6 +831,24 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
                 uint32_t pbol = bol - 1; while (pbol > 0 && f->buf[pbol - 1] != '\n') pbol--;
                 uint32_t plen = bol - 1 - pbol;
                 f->caret = pbol + (col < plen ? col : plen);
+            }
+        } else if (ev->keycode == 0x49 || ev->keycode == 0x51) {              /* page up/down */
+            /* A screenful is however many lines fit, which only the paint pass
+             * knows (it has the pane height); it leaves the count in ta_vis.
+             * Before the first paint there is none, so fall back to a
+             * plausible one. */
+            uint32_t step = f->ta_vis ? f->ta_vis : 16u;
+            for (uint32_t i = 0; i < step; ++i) {
+                if (ev->keycode == 0x49) {
+                    if (f->caret == 0) break;
+                    uint32_t b = f->caret; while (b > 0 && f->buf[b - 1] != '\n') b--;
+                    f->caret = (b > 0) ? b - 1 : 0;
+                } else {
+                    uint32_t e2 = f->caret;
+                    while (e2 < f->buf_len && f->buf[e2] != '\n') e2++;
+                    if (e2 >= f->buf_len) { f->caret = f->buf_len; break; }
+                    f->caret = e2 + 1;
+                }
             }
         } else if (ev->keycode == 0x50) {                                     /* down */
             uint32_t eol = f->caret; while (eol < f->buf_len && f->buf[eol] != '\n') eol++;
@@ -835,9 +860,9 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
                 uint32_t nlen = nEol - nbol;
                 f->caret = nbol + (col < nlen ? col : nlen);
             }
-        } else if (c >= 32 && c < 127) { char cc = c; ta_insert(f, &cc, 1); }
-        else if (c == '\t') ta_insert(f, "    ", 4);
-        if (f->on_change) f->on_change(app, f, f->user);
+        } else if (ed && c >= 32 && c < 127) { char cc = c; ta_insert(f, &cc, 1); }
+        else if (ed && c == '\t') ta_insert(f, "    ", 4);
+        if (ed && f->on_change) f->on_change(app, f, f->user);
         app->needs_paint = true;
     } else if (f->kind == IMUI_LIST) {
         if (ev->keycode == 0x48 && f->sel > 0) f->sel--;                      /* up */
@@ -853,6 +878,8 @@ int imui_run(imui_app_t *app) {
     int prev_mx = -1, prev_my = -1, prev_btn = 0;
 
     while (app->running) {
+        if (app->on_tick) app->on_tick(app, app->root, app->user);
+
         /* window closed by the WM? */
         uint32_t rx, ry, rw, rh;
         if (window_get_rect(app->win, &rx, &ry, &rw, &rh) < 0) { app->running = false; break; }

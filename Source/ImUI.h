@@ -19,6 +19,10 @@
  *   IMUI_TEXTBOX          single-line editable text, on_submit / on_change
  *   IMUI_LIST             scrollable rows {icon,text,subtext}, on_activate
  *   IMUI_TEXTAREA         multi-line editor buffer, on_change
+ *
+ * Clearing `editable` on a textbox or textarea makes it read-only: the caret
+ * still moves (so the keyboard scrolls a long buffer) but nothing types into
+ * it. That is what a log/output pane wants.
  */
 
 #include <stdint.h>
@@ -75,6 +79,7 @@ struct imui_widget {
     uint32_t buf_len, buf_cap;
     uint32_t caret;
     uint32_t ta_scroll;        /* first visible line for textarea */
+    uint32_t ta_vis;           /* textarea lines that fit; set by paint */
     bool     editable;
 
     /* callbacks */
@@ -104,6 +109,11 @@ struct imui_app {
     bool        needs_layout;
     bool        needs_paint;
     void       *user;
+    /* Called once per event-loop iteration (~60 Hz), before layout and paint.
+     * An app that has to watch something the toolkit knows nothing about -- a
+     * file descriptor, a socket, a clock -- polls it from here instead of
+     * writing its own event loop. `w` is the root widget. */
+    imui_cb_t   on_tick;
     /* palette (mirrors plasma.theme) */
     uint32_t c_bg, c_surface, c_surface_alt, c_hover, c_text, c_text_dim,
              c_accent, c_accent_soft, c_border, c_danger, c_selection;
