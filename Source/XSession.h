@@ -32,6 +32,7 @@ typedef struct {
     uint32_t    height;
     int         mirrored;   /* X is redirected into `window` */
     int         joined;     /* a server was already running; we did not start it */
+    uint8_t     buttons;    /* mouse buttons last forwarded to the X server */
 } xsession_t;
 
 /* Bring up the X server, or join the running one, and give it somewhere to

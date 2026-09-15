@@ -28,4 +28,11 @@ typedef struct __attribute__((packed)) {
 } input_mouse_event_t;
 
 int32_t input_read_keyboard(input_keyboard_event_t *event_out);
+
+/* Queue a raw Linux input_event on /dev/input/eventN (device 0 = keyboard,
+ * 1 = absolute pointer, ABS_X/ABS_Y over 0..65535). How a window that hosts
+ * an X server passes its keyboard and mouse on to it; the caller closes each
+ * frame with EV_SYN/SYN_REPORT. */
+int32_t input_evdev_inject(uint32_t device, uint16_t type, uint16_t code,
+                           int32_t value);
 int32_t input_read_mouse(input_mouse_event_t *event_out);

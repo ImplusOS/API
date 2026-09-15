@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "Graphics.h"
+#include "Input.h"
 #include "Process.h"
 #include "Serial.h"
 #include "Socket.h"
@@ -82,6 +83,7 @@ int32_t xsession_open(xsession_t *session, const char *title,
     session->height = 0u;
     session->mirrored = 0;
     session->joined = 0;
+    session->buttons = 0u;
 
     /* Someone got here first. Join their server: the display, the panel and
      * the KMS mirror all belong to them. */
@@ -134,6 +136,108 @@ int32_t xsession_open(xsession_t *session, const char *title,
     return 0;
 }
 
+/* Linux input-event codes (linux/input-event-codes.h) used below. */
+#define LX_EV_SYN      0x00u
+#define LX_EV_KEY      0x01u
+#define LX_EV_REL      0x02u
+#define LX_EV_ABS      0x03u
+#define LX_SYN_REPORT  0u
+#define LX_REL_WHEEL   8u
+#define LX_ABS_X       0u
+#define LX_ABS_Y       1u
+#define LX_BTN_LEFT    0x110u
+#define LX_BTN_RIGHT   0x111u
+#define LX_BTN_MIDDLE  0x112u
+#define LX_ABS_MAX     65535u
+
+/* The kernel's keycodes are PS/2 scan code set 1, with 0xE0-prefixed keys
+ * as 0xE0xx (Kernel/Source/include/kernel/keycodes.h). Linux's KEY_* values
+ * 1..88 are set 1 unchanged; the extended and Japanese keys are not. */
+static uint16_t xsession_linux_keycode(uint16_t keycode)
+{
+    if (keycode >= 1u && keycode <= 0x58u) {
+        return keycode;
+    }
+    switch (keycode) {
+    case 0x70u:   return 93u;   /* KEY_KATAKANAHIRAGANA */
+    case 0x73u:   return 89u;   /* KEY_RO */
+    case 0x79u:   return 92u;   /* KEY_HENKAN */
+    case 0x7Bu:   return 94u;   /* KEY_MUHENKAN */
+    case 0x7Du:   return 124u;  /* KEY_YEN */
+    case 0xE01Cu: return 96u;   /* KEY_KPENTER */
+    case 0xE01Du: return 97u;   /* KEY_RIGHTCTRL */
+    case 0xE035u: return 98u;   /* KEY_KPSLASH */
+    case 0xE037u: return 99u;   /* KEY_SYSRQ */
+    case 0xE038u: return 100u;  /* KEY_RIGHTALT */
+    case 0xE047u: return 102u;  /* KEY_HOME */
+    case 0xE048u: return 103u;  /* KEY_UP */
+    case 0xE049u: return 104u;  /* KEY_PAGEUP */
+    case 0xE04Bu: return 105u;  /* KEY_LEFT */
+    case 0xE04Du: return 106u;  /* KEY_RIGHT */
+    case 0xE04Fu: return 107u;  /* KEY_END */
+    case 0xE050u: return 108u;  /* KEY_DOWN */
+    case 0xE051u: return 109u;  /* KEY_PAGEDOWN */
+    case 0xE052u: return 110u;  /* KEY_INSERT */
+    case 0xE053u: return 111u;  /* KEY_DELETE */
+    case 0xE05Bu: return 125u;  /* KEY_LEFTMETA */
+    case 0xE05Cu: return 126u;  /* KEY_RIGHTMETA */
+    case 0xE05Du: return 127u;  /* KEY_COMPOSE */
+    default:      return 0u;
+    }
+}
+
+static int32_t xsession_scale_axis(uint16_t pos, uint32_t extent)
+{
+    if (extent <= 1u) {
+        return 0;
+    }
+    uint32_t p = pos >= extent ? extent - 1u : pos;
+    return (int32_t)((p * LX_ABS_MAX) / (extent - 1u));
+}
+
+/* Hand the window's keyboard and mouse to the X server. X reads
+ * /dev/input/event0 (keyboard) and event1 (absolute pointer) through
+ * xf86-input-evdev; the compositor delivers this window's input to us as IPC
+ * events, in window-content coordinates. Before this, nothing ever fed those
+ * devices, so a client like Chromium could be seen but not used. */
+static void xsession_forward_input(xsession_t *session)
+{
+    input_keyboard_event_t key;
+    while (window_input_keyboard_poll(&key) > 0) {
+        uint16_t code = xsession_linux_keycode(key.keycode);
+        if (code == 0u) {
+            continue;
+        }
+        (void)input_evdev_inject(0u, LX_EV_KEY, code, key.pressed ? 1 : 0);
+        (void)input_evdev_inject(0u, LX_EV_SYN, LX_SYN_REPORT, 0);
+    }
+
+    input_mouse_event_t mouse;
+    while (window_input_mouse_poll(&mouse) > 0) {
+        (void)input_evdev_inject(1u, LX_EV_ABS, LX_ABS_X,
+                                 xsession_scale_axis(mouse.x, session->width));
+        (void)input_evdev_inject(1u, LX_EV_ABS, LX_ABS_Y,
+                                 xsession_scale_axis(mouse.y, session->height));
+        uint8_t changed = (uint8_t)(mouse.buttons ^ session->buttons);
+        static const struct { uint8_t mask; uint16_t code; } buttons[] = {
+            { INPUT_MOUSE_BTN_LEFT,   LX_BTN_LEFT },
+            { INPUT_MOUSE_BTN_RIGHT,  LX_BTN_RIGHT },
+            { INPUT_MOUSE_BTN_MIDDLE, LX_BTN_MIDDLE },
+        };
+        for (uint32_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
+            if ((changed & buttons[i].mask) != 0u) {
+                (void)input_evdev_inject(1u, LX_EV_KEY, buttons[i].code,
+                                         (mouse.buttons & buttons[i].mask) ? 1 : 0);
+            }
+        }
+        session->buttons = mouse.buttons;
+        if (mouse.wheel != 0) {
+            (void)input_evdev_inject(1u, LX_EV_REL, LX_REL_WHEEL, mouse.wheel);
+        }
+        (void)input_evdev_inject(1u, LX_EV_SYN, LX_SYN_REPORT, 0);
+    }
+}
+
 int32_t xsession_run(xsession_t *session, const char *path, const char *args)
 {
     if (session == NULL || path == NULL) {
@@ -149,11 +253,19 @@ int32_t xsession_run(xsession_t *session, const char *path, const char *args)
     /* The native process_waitpid() never blocks: it reports 0 while the child
      * still runs and only returns the pid once it has exited. Polling it is
      * what keeps the mirror being repainted in the meantime. */
+    if (session->window != 0u) {
+        (void)window_subscribe_keyboard(session->window);
+        (void)window_subscribe_mouse(session->window);
+    }
+
     int32_t status = 0;
     for (;;) {
         int32_t reaped = process_waitpid(pid, &status, 0);
         if (reaped == pid) break;   /* exited, status valid */
         if (reaped < 0) break;      /* no such child */
+        if (session->window != 0u) {
+            xsession_forward_input(session);
+        }
         if (session->mirrored && display_kms_mirror_take_dirty()) {
             window_damage(session->window, 0u, 0u,
                           session->width, session->height);
