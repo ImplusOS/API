@@ -9,6 +9,9 @@ void process_yield(void);
 int32_t process_get_current_pid(void);
 int32_t process_spawn(const char *path);
 int32_t process_spawn_with_arg(const char *path, const char *argument);
+/* The uid/gid Linux programs this process spawns from now on will run as.
+ * (uint32_t)-1 leaves a value unchanged. */
+int32_t process_set_credentials(uint32_t uid, uint32_t gid);
 int32_t process_get_launch_argument(char *buffer, uint32_t capacity);
 int32_t process_waitpid(int32_t pid, int32_t *status_out, int32_t options);
 int32_t process_getppid(void);

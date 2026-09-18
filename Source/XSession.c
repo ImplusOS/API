@@ -47,26 +47,48 @@ static int server_is_listening(void)
     return unix_socket_is_listening(X_SOCKET_PATH) > 0;
 }
 
-static int wait_for_server(void)
+static int wait_for_server(xsession_t *session)
 {
     uint64_t started = get_uptime_ms();
     uint32_t waited = 0u;
     int ready = 0;
+    int exited = 0;
+    int32_t status = 0;
     while (waited < XORG_READY_TIMEOUT_MS) {
         if (server_is_listening()) {
             ready = 1;
             break;
         }
+        /* The server can also die before it ever listens -- a missing symbol
+         * in one of the ~40 shared objects it dynamic-links is the usual way,
+         * and ld.so exits 127 for that. process_waitpid() does not block (it
+         * reports 0 while the child still runs), so asking every pass turns
+         * what used to be a silent two-minute stall into an immediate,
+         * legible failure: the old loop sat here for the full timeout after
+         * Xorg had already exited, and the log said "TIMED OUT" when the real
+         * event was an exit a minute earlier. */
+        if (session->xorg_pid > 0 &&
+            process_waitpid(session->xorg_pid, &status, 0) == session->xorg_pid) {
+            session->xorg_pid = -1;  /* reaped: nothing left to kill */
+            exited = 1;
+            break;
+        }
         sleep_ms(XORG_POLL_INTERVAL_MS);
         waited += XORG_POLL_INTERVAL_MS;
     }
-    char message[96];
+    char message[128];
     /* Worth logging on every boot: essentially all of the time before the
      * first frame is spent here, so it is the number to watch when anything
      * touching foreign-process startup changes. */
-    snprintf(message, sizeof message, "[xsession] Xorg %s after %lu ms\n",
-             ready ? "ready" : "TIMED OUT",
-             (unsigned long)(get_uptime_ms() - started));
+    if (exited) {
+        snprintf(message, sizeof message,
+                 "[xsession] Xorg exited (status %ld) after %lu ms, never listened\n",
+                 (long)status, (unsigned long)(get_uptime_ms() - started));
+    } else {
+        snprintf(message, sizeof message, "[xsession] Xorg %s after %lu ms\n",
+                 ready ? "ready" : "TIMED OUT",
+                 (unsigned long)(get_uptime_ms() - started));
+    }
     serial_write_string(message);
     return ready;
 }
@@ -129,7 +151,7 @@ int32_t xsession_open(xsession_t *session, const char *title,
         xsession_close(session);
         return -1;
     }
-    if (!wait_for_server()) {
+    if (!wait_for_server(session)) {
         xsession_close(session);
         return -1;
     }
@@ -238,12 +260,74 @@ static void xsession_forward_input(xsession_t *session)
     }
 }
 
+/* Startup timing probe (-DXSESSION_TIMING=1). Logs, on the same uptime clock
+ * the kernel stamps "[app] spawn ... at=" with, when the client's first frame
+ * reaches the mirror, when the middle of the surface first shows something
+ * other than black (a dialog or page being painted) and when the left edge
+ * turns light (a page filling the whole window). Two pixel reads per mirrored
+ * frame; nothing at all when compiled out. */
+#ifndef XSESSION_TIMING
+#define XSESSION_TIMING 0
+#endif
+
+#if XSESSION_TIMING
+#include <time.h>
+
+/* The kernel's monotonic clock (what "[app] ... at=" is stamped with), not
+ * get_uptime_ms(): that one counts timer ticks and falls behind whenever
+ * interrupts are held off. */
+static uint64_t xsession_timing_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return get_uptime_ms();
+    }
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static void xsession_timing_note(xsession_t *session, uint64_t spawned_ms)
+{
+    static int stage;
+    uint32_t w = 0u, h = 0u;
+    uint32_t *px = window_get_backing_store(session->window, &w, &h);
+    if (px == NULL || w < 64u || h < 64u) {
+        return;
+    }
+    uint32_t center = px[(h / 2u) * w + w / 2u] & 0x00FFFFFFu;
+    uint32_t edge = px[(h / 2u) * w + 16u] & 0x00FFFFFFu;
+    const char *what = NULL;
+    if (stage == 0) {
+        what = "first-frame";
+        stage = 1;
+    } else if (stage == 1 && center != 0u) {
+        what = "ui-painted";
+        stage = 2;
+    } else if (stage == 2 && ((edge >> 16) & 0xFFu) >= 0xE0u &&
+               (edge & 0xFFu) >= 0xE0u) {
+        what = "page-painted";
+        stage = 3;
+    }
+    if (what != NULL) {
+        char line[96];
+        uint64_t now = xsession_timing_now_ms();
+        snprintf(line, sizeof(line),
+                 "[xsession] %s at=%llums (+%llums) c=%06x e=%06x\n", what,
+                 (unsigned long long)now,
+                 (unsigned long long)(now - spawned_ms), center, edge);
+        serial_write_string(line);
+    }
+}
+#endif
+
 int32_t xsession_run(xsession_t *session, const char *path, const char *args)
 {
     if (session == NULL || path == NULL) {
         return -1;
     }
 
+#if XSESSION_TIMING
+    uint64_t spawned_ms = xsession_timing_now_ms();
+#endif
     int32_t pid = (args != NULL) ? process_spawn_with_arg(path, args)
                                  : process_spawn(path);
     if (pid < 0) {
@@ -269,6 +353,9 @@ int32_t xsession_run(xsession_t *session, const char *path, const char *args)
         if (session->mirrored && display_kms_mirror_take_dirty()) {
             window_damage(session->window, 0u, 0u,
                           session->width, session->height);
+#if XSESSION_TIMING
+            xsession_timing_note(session, spawned_ms);
+#endif
         }
         sleep_ms(session->mirrored ? XSESSION_FRAME_MS : XSESSION_IDLE_MS);
     }
