@@ -13,6 +13,11 @@ int32_t file_open(const char *path, uint64_t flags);
 int32_t file_creat(const char *path);
 int64_t file_read(int32_t fd, void *buffer, uint64_t len);
 int64_t file_write(int32_t fd, const void *buffer, uint64_t len);
+/* Make an open file exactly `length` bytes long (ftruncate(2)). The open
+ * flags have no truncate bit, so writing a shorter buffer over a longer
+ * file otherwise leaves the old tail behind -- which is how a saved file
+ * used to keep the end of its previous contents. */
+int32_t file_truncate(int32_t fd, uint64_t length);
 int64_t file_seek(int32_t fd, int64_t offset, int32_t whence);
 int32_t file_close(int32_t fd);
 int32_t file_mkdir(const char *path);

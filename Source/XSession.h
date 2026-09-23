@@ -28,8 +28,18 @@
 typedef struct {
     int32_t     xorg_pid;   /* > 0 only when this session started the server */
     window_id_t window;     /* 0 when hosted elsewhere or X owns the panel */
+    /* The size X drives. It is read off the connector once, at server start,
+     * so it stays put for the life of the session even when the window is
+     * resized under it -- and input has to be scaled against it, not against
+     * the window, or the pointer lands somewhere other than where the cursor
+     * is. Making a resize move the server's mode needs RandR, which the KMS
+     * shim does not implement yet. */
     uint32_t    width;
     uint32_t    height;
+    /* The backing store the mirror writes into: the window's content area,
+     * which a resize replaces. Equal to width/height until that happens. */
+    uint32_t    surface_w;
+    uint32_t    surface_h;
     int         mirrored;   /* X is redirected into `window` */
     int         joined;     /* a server was already running; we did not start it */
     uint8_t     buttons;    /* mouse buttons last forwarded to the X server */

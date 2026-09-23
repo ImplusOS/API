@@ -10,6 +10,11 @@
 
 #include "XMLParser.h"
 
+/* The keypad scan codes 0x47..0x53 look like the navigation keys, but the
+ * kernel sends the real arrows as KEY_UP 0xE048, KEY_DOWN 0xE050 and so on.
+ * Comparing against the bare codes meant no list or caret ever moved. */
+#include "../../../Kernel/Source/include/kernel/keycodes.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +159,57 @@ static void sdisc(surf_t *s, int cx, int cy, int r, uint32_t c) {
         for (int i = -r; i <= r; ++i)
             if (i * i + j * j <= r * r) sput(s, cx + i, cy + j, c);
 }
+
+/* M3 list-item height: 56px carries a line of supporting text, which is
+ * what most of these rows have. Shared by the painter and the hit test --
+ * they drifted apart once, and a click then selected the wrong row. */
+#define IMUI_LIST_ROW_H 56
+
+/* ------------------------------------------------------- M3 shapes */
+
+/* An M3 shape with independent corners, in the order M3 writes them:
+ * top-left, top-right, bottom-right, bottom-left. A filled text field is
+ * round at the top and square at the bottom, which is the whole reason
+ * this exists. */
+static void sround4(surf_t *s, int x, int y, int w, int h,
+                    int tl, int tr, int br, int bl, uint32_t c) {
+    int lim = (w < h ? w : h) / 2;
+    if (tl > lim) tl = lim;
+    if (tr > lim) tr = lim;
+    if (br > lim) br = lim;
+    if (bl > lim) bl = lim;
+    for (int j = 0; j < h; ++j) {
+        int cut_l = 0, cut_r = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            int r = pass == 0 ? (j < h / 2 ? tl : bl) : (j < h / 2 ? tr : br);
+            if (r <= 0) continue;
+            int dy = j < h / 2 ? r - 1 - j : j - (h - r);
+            if (dy < 0) continue;
+            int cut = r;
+            for (int i = 0; i < r; ++i) {
+                int dx = r - 1 - i;
+                if (dx * dx + dy * dy <= r * r) { cut = i; break; }
+            }
+            if (pass == 0) cut_l = cut; else cut_r = cut;
+        }
+        if (cut_l + cut_r >= w) continue;
+        sfill(s, x + cut_l, y + j, w - cut_l - cut_r, 1, c);
+    }
+}
+
+/* An M3 outlined container: the outline shape with the fill laid back
+ * inside it, which is a ring without needing a second coverage pass. */
+static void soutlined(surf_t *s, int x, int y, int w, int h, int r,
+                      uint32_t fill, uint32_t outline, int thickness) {
+    sround(s, x, y, w, h, r, outline);
+    if (w > thickness * 2 && h > thickness * 2) {
+        sround(s, x + thickness, y + thickness, w - thickness * 2,
+               h - thickness * 2, r > thickness ? r - thickness : 0, fill);
+    }
+}
+
+/* The shortest-side radius of an M3 "full" (stadium) shape. */
+static int sfull(int w, int h) { return (w < h ? w : h) / 2; }
 
 /* ------------------------------------------------------------- text */
 
@@ -368,15 +424,27 @@ imui_widget_t *imui_button(imui_widget_t *p, const char *t, imui_icon_t ic, imui
 }
 imui_widget_t *imui_iconbutton(imui_widget_t *p, imui_icon_t ic, imui_cb_t cb, void *u) {
     imui_widget_t *w = w_new(IMUI_ICONBUTTON);
-    w->icon = ic; w->on_click = cb; w->user = u; w->min_w = 32; w->min_h = 32;
+    w->icon = ic; w->on_click = cb; w->user = u; w->min_w = 40; w->min_h = 40;
     w_attach(p, w);
     return w;
+}
+imui_widget_t *imui_set_variant(imui_widget_t *b, imui_variant_t v) {
+    if (b) b->variant = v;
+    return b;
+}
+imui_widget_t *imui_set_single_click(imui_widget_t *l, bool enable) {
+    if (l) l->single_click = enable;
+    return l;
+}
+imui_widget_t *imui_set_type_role(imui_widget_t *l, imui_type_role_t r) {
+    if (l) l->type_role = r;
+    return l;
 }
 imui_widget_t *imui_spacer(imui_widget_t *p) { return imui_add(p, IMUI_SPACER, NULL); }
 imui_widget_t *imui_divider(imui_widget_t *p) { return imui_add(p, IMUI_DIVIDER, NULL); }
 imui_widget_t *imui_textbox(imui_widget_t *p, const char *t) {
     imui_widget_t *w = w_new(IMUI_TEXTBOX);
-    w->buf_cap = 512; w->buf = calloc(1, w->buf_cap); w->editable = true; w->min_h = 32;
+    w->buf_cap = 512; w->buf = calloc(1, w->buf_cap); w->editable = true; w->min_h = 56;
     if (t) { strncpy(w->buf, t, w->buf_cap - 1); w->buf_len = (uint32_t)strlen(w->buf); w->caret = w->buf_len; }
     w_attach(p, w);
     return w;
@@ -495,9 +563,21 @@ static imui_widget_t *xml_build(imui_widget_t *parent, xml_node_t *n) {
         if (fill && atoi(fill)) w->fill_bg = true;
     } else if (!strcmp(tag, "label")) {
         w = imui_label(parent, n->text[0] ? n->text : xml_get_attr(n, "text"));
+        const char *role = xml_get_attr(n, "role");
+        if (role) {
+            if (!strcmp(role, "headline")) w->type_role = IMUI_HEADLINE;
+            else if (!strcmp(role, "title")) w->type_role = IMUI_TITLE;
+            else if (!strcmp(role, "small")) w->type_role = IMUI_LABEL_SMALL;
+        }
     } else if (!strcmp(tag, "button")) {
         w = imui_button(parent, n->text[0] ? n->text : xml_get_attr(n, "text"),
                         icon_by_name(xml_get_attr(n, "icon")), NULL, NULL);
+        const char *variant = xml_get_attr(n, "variant");
+        if (variant) {
+            if (!strcmp(variant, "filled")) w->variant = IMUI_FILLED;
+            else if (!strcmp(variant, "tonal")) w->variant = IMUI_TONAL;
+            else if (!strcmp(variant, "outlined")) w->variant = IMUI_OUTLINED;
+        }
     } else if (!strcmp(tag, "iconbutton")) {
         w = imui_iconbutton(parent, icon_by_name(xml_get_attr(n, "icon")), NULL, NULL);
     } else if (!strcmp(tag, "spacer")) {
@@ -550,17 +630,9 @@ imui_app_t *imui_create(uint32_t w, uint32_t h, const char *title) {
     app->root = w_new(IMUI_COL);
     app->root->grow = 1;
 
-    app->c_bg          = 0xFFF5F5F5;
-    app->c_surface     = 0xFFFFFFFF;
-    app->c_surface_alt = 0xFFF3F4F6;
-    app->c_hover       = 0x14000000;
-    app->c_text        = 0xFF1C1B1F;
-    app->c_text_dim    = 0xFF49454F;
-    app->c_accent      = 0xFF3B82F6;
-    app->c_accent_soft = 0x1F3B82F6;
-    app->c_border      = 0x22000000;
-    app->c_danger      = 0xFFB3261E;
-    app->c_selection   = 0x243B82F6;
+    /* The desktop's own scheme, not a copy of its defaults: retinting the
+     * shell retints every app built on this the next time it starts. */
+    m3_load_desktop_theme(&app->color, &app->type);
     return app;
 }
 
@@ -575,14 +647,34 @@ void imui_request_paint(imui_app_t *app) { if (app) app->needs_paint = true; }
 
 /* ------------------------------------------------------------- layout */
 
+static float label_size(imui_app_t *app, imui_type_role_t role) {
+    switch (role) {
+    case IMUI_HEADLINE:    return app->type.headline_small;
+    case IMUI_TITLE:       return app->type.title_medium;
+    case IMUI_LABEL_SMALL: return app->type.label_small;
+    case IMUI_BODY:
+    default:               return app->type.body_medium;
+    }
+}
+
+/* M3 component heights: a button and an icon button are 40px, a filled
+ * text field is 56px, and a line of body text needs its own size plus the
+ * scale's leading. */
 static int leaf_main(imui_app_t *app, imui_widget_t *w, bool horizontal) {
-    (void)app;
     switch (w->kind) {
-    case IMUI_LABEL:   return horizontal ? text_w(w->text, 14) + 4 : 20;
-    case IMUI_BUTTON:  return horizontal ? text_w(w->text, 14) + (w->icon ? 44 : 24) : 32;
-    case IMUI_ICONBUTTON: return 34;
+    case IMUI_LABEL: {
+        float px = label_size(app, w->type_role);
+        return horizontal ? text_w(w->text, px) + 4 : (int)px + 10;
+    }
+    case IMUI_BUTTON:
+        /* M3 asks for 24px of padding either side of a text button's
+         * label, and room for a 18px leading icon plus its gap. */
+        return horizontal ? text_w(w->text, app->type.label_large) +
+                            (w->icon ? 66 : 48)
+                          : 40;
+    case IMUI_ICONBUTTON: return 40;
     case IMUI_DIVIDER: return 1;
-    case IMUI_TEXTBOX: return horizontal ? 120 : 32;
+    case IMUI_TEXTBOX: return horizontal ? 160 : 56;
     case IMUI_SPACER:  return 0;
     default:           return 0; /* containers/list/textarea rely on grow */
     }
@@ -600,24 +692,53 @@ static void layout(imui_app_t *app, imui_widget_t *w, int x, int y, int cw, int 
     if (n == 0) return;
     main_avail -= w->gap * (n - 1);
 
+    /* A non-growing child is worth leaf_main() *or* its min_h, whichever is
+     * larger: a container reports 0 from leaf_main() and asks for its height
+     * through min_h alone. Counting only the leaf size left the fixed total
+     * short by every bar in the tree, so the growing sibling took the whole
+     * axis and pushed the last bar -- a status bar -- past the edge. */
     int fixed = 0, grow_sum = 0;
     for (int i = 0; i < n; ++i) {
         imui_widget_t *c = w->children[i];
         if (c->grow > 0) grow_sum += (int)c->grow;
-        else fixed += leaf_main(app, c, horiz);
+        else {
+            int m = leaf_main(app, c, horiz);
+            int cm = horiz ? (int)c->min_w : (int)c->min_h;
+            if (m < cm) m = cm;
+            fixed += m;
+        }
     }
-    int flex = main_avail - fixed;
+
+    /* Shrink to fit. A window narrowed past what its fixed children want
+     * used to let them keep their full size and run off the end, which took
+     * whatever was last in the row -- a status label, a text field -- off
+     * the screen entirely. Scaling them down instead keeps everything
+     * inside the container, tighter rather than missing. */
+    int shrink_num = 1, shrink_den = 1;
+    if (fixed > main_avail && fixed > 0) {
+        shrink_num = main_avail > 0 ? main_avail : 0;
+        shrink_den = fixed;
+    }
+    int flex = main_avail - (fixed * shrink_num) / shrink_den;
     if (flex < 0) flex = 0;
 
     int cur = horiz ? px : py;
     for (int i = 0; i < n; ++i) {
         imui_widget_t *c = w->children[i];
-        int m = (c->grow > 0 && grow_sum > 0)
-                ? (flex * (int)c->grow / grow_sum)
-                : leaf_main(app, c, horiz);
-        int cm = (int)c->min_w;
-        if (!horiz) cm = (int)c->min_h;
-        if (m < cm) m = cm;
+        int m;
+        if (c->grow > 0 && grow_sum > 0) {
+            m = flex * (int)c->grow / grow_sum;
+            /* A minimum is a request, not a guarantee: honouring it in a
+             * container too small for it is what pushes a sibling out. */
+            int cm = horiz ? (int)c->min_w : (int)c->min_h;
+            if (m < cm && cm <= main_avail) m = cm;
+        } else {
+            m = leaf_main(app, c, horiz);
+            int cm = horiz ? (int)c->min_w : (int)c->min_h;
+            if (m < cm) m = cm;
+            m = (m * shrink_num) / shrink_den;
+        }
+        if (m < 0) m = 0;
         if (horiz)
             layout(app, c, cur, py, m, inner_h);
         else
@@ -628,55 +749,144 @@ static void layout(imui_app_t *app, imui_widget_t *w, int x, int y, int cw, int 
 
 /* ------------------------------------------------------------- paint */
 
+/*
+ * Every widget below is a Material Design 3 component: a shape from the M3
+ * scale, a container from the scheme's roles, a state layer for what the
+ * pointer is doing to it, and text from the M3 type scale. Nothing here
+ * names a colour.
+ */
+
+/* The container a button sits on, so a state layer over it resolves
+ * against the right tone. */
+static uint32_t widget_backdrop(imui_app_t *app, imui_widget_t *w) {
+    for (imui_widget_t *p = w->parent; p; p = p->parent) {
+        if (p->kind != IMUI_ROW && p->kind != IMUI_COL) continue;
+        if (!p->fill_bg) continue;
+        return p->variant == IMUI_FILLED ? app->color.surface_container
+                                         : app->color.surface;
+    }
+    return app->color.surface;
+}
+
+/* An M3 button's container and label, given its emphasis and what the
+ * pointer is doing. */
+static void button_roles(imui_app_t *app, imui_widget_t *w, uint32_t backdrop,
+                         uint32_t *container, uint32_t *on_container,
+                         bool *outlined) {
+    const m3_scheme_t *m3 = &app->color;
+    uint32_t state = w->pressed ? M3_STATE_PRESSED
+                   : w->hover   ? M3_STATE_HOVER : 0u;
+    *outlined = false;
+    switch (w->variant) {
+    case IMUI_FILLED:
+        *container = m3_state_layer(m3->primary, m3->on_primary, state);
+        *on_container = m3->on_primary;
+        break;
+    case IMUI_TONAL:
+        *container = m3_state_layer(m3->secondary_container,
+                                    m3->on_secondary_container, state);
+        *on_container = m3->on_secondary_container;
+        break;
+    case IMUI_OUTLINED:
+        *container = state ? m3_state_layer(backdrop, m3->primary, state)
+                           : backdrop;
+        *on_container = m3->primary;
+        *outlined = true;
+        break;
+    case IMUI_TEXT:
+    default:
+        /* A text button has no container until it is touched; then the
+         * state layer is the only thing that appears. */
+        *container = state ? m3_state_layer(backdrop, m3->primary, state) : 0u;
+        *on_container = m3->primary;
+        break;
+    }
+}
+
 static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
+    const m3_scheme_t *m3 = &app->color;
     int x = w->rx, y = w->ry, cw = (int)w->rw, ch = (int)w->rh;
 
     switch (w->kind) {
     case IMUI_ROW: case IMUI_COL:
-        if (w->fill_bg) {
-            sround(s, x, y, cw, ch, 8, app->c_surface);
-            sstroke(s, x, y, cw, ch, app->c_border);
+        /* A filled container is an M3 bar -- a toolbar or a status bar,
+         * edge to edge on a surface-container tone. Anything else with a
+         * background is an outlined card. */
+        if (w->fill_bg && w->variant == IMUI_FILLED) {
+            sfill(s, x, y, cw, ch, m3->surface_container);
+            sfill(s, x, y + ch - 1, cw, 1, m3->outline_variant);
+        } else if (w->fill_bg) {
+            soutlined(s, x, y, cw, ch, M3_SHAPE_MEDIUM,
+                      m3->surface, m3->outline_variant, 1);
         }
         for (uint32_t i = 0; i < w->child_count; ++i) paint(app, s, w->children[i]);
         break;
-    case IMUI_LABEL:
-        draw_text(s, x + 2, y + (ch - 15) / 2, w->text, 14, app->c_text, cw - 4);
+    case IMUI_LABEL: {
+        float px = label_size(app, w->type_role);
+        uint32_t color = w->type_role == IMUI_LABEL_SMALL ? m3->on_surface_variant
+                                                          : m3->on_surface;
+        draw_text(s, x + 2, y + (ch - (int)px - 3) / 2, w->text, px, color, cw - 4);
         break;
+    }
     case IMUI_BUTTON: {
-        uint32_t bg = w->pressed ? app->c_accent_soft : w->hover ? app->c_hover : 0;
-        if (bg) sround(s, x, y, cw, ch, 8, bg);
-        int tx = x + 10;
-        if (w->icon) { imui_icon(s, x + 8, y + (ch - 18) / 2, 18, w->icon, app->c_text); tx = x + 32; }
-        draw_text(s, tx, y + (ch - 15) / 2, w->text, 14, app->c_text, cw - (tx - x) - 6);
+        uint32_t container, on_container;
+        bool outlined;
+        button_roles(app, w, widget_backdrop(app, w), &container, &on_container,
+                     &outlined);
+        int r = sfull(cw, ch);
+        if (outlined)
+            soutlined(s, x, y, cw, ch, r, container, m3->outline, 1);
+        else if (container)
+            sround(s, x, y, cw, ch, r, container);
+        int tx = x + 16;
+        if (w->icon) {
+            imui_icon(s, x + 14, y + (ch - 18) / 2, 18, w->icon, on_container);
+            tx = x + 40;
+        }
+        draw_text(s, tx, y + (ch - (int)app->type.label_large - 3) / 2, w->text,
+                  app->type.label_large, on_container, cw - (tx - x) - 10);
         break;
     }
     case IMUI_ICONBUTTON: {
-        uint32_t bg = w->pressed ? app->c_accent_soft : w->hover ? app->c_hover : 0;
-        if (bg) sround(s, x + 1, y + 1, cw - 2, ch - 2, 8, bg);
-        imui_icon(s, x + (cw - 20) / 2, y + (ch - 20) / 2, 20, w->icon, app->c_text);
+        /* M3 icon button: a full-shape state layer under the glyph, and
+         * nothing at all when the pointer is elsewhere. */
+        uint32_t state = w->pressed ? M3_STATE_PRESSED
+                       : w->hover   ? M3_STATE_HOVER : 0u;
+        if (state)
+            sround(s, x, y, cw, ch, sfull(cw, ch),
+                   m3_state_layer(widget_backdrop(app, w), m3->on_surface, state));
+        imui_icon(s, x + (cw - 20) / 2, y + (ch - 20) / 2, 20, w->icon,
+                  m3->on_surface_variant);
         break;
     }
     case IMUI_DIVIDER:
-        if (cw > ch) sfill(s, x, y + ch / 2, cw, 1, app->c_border);
-        else sfill(s, x + cw / 2, y, 1, ch, app->c_border);
+        if (cw > ch) sfill(s, x, y + ch / 2, cw, 1, m3->outline_variant);
+        else sfill(s, x + cw / 2, y, 1, ch, m3->outline_variant);
         break;
     case IMUI_SPACER: break;
     case IMUI_TEXTBOX: {
+        /* M3 filled text field: rounded at the top, square at the bottom,
+         * with an indicator line that turns primary when it has focus. */
         bool focus = (app->focus == w);
-        sround(s, x, y, cw, ch, 8, app->c_surface_alt);
-        if (focus) sstroke(s, x, y, cw, ch, app->c_accent);
-        else sstroke(s, x, y, cw, ch, app->c_border);
-        draw_text(s, x + 10, y + (ch - 15) / 2, w->buf, 14, app->c_text, cw - 20);
+        sround4(s, x, y, cw, ch, M3_SHAPE_EXTRA_SMALL, M3_SHAPE_EXTRA_SMALL,
+                0, 0, m3->surface_container_highest);
+        int indicator = focus ? 2 : 1;
+        sfill(s, x, y + ch - indicator, cw, indicator,
+              focus ? m3->primary : m3->on_surface_variant);
+        float px = app->type.body_large;
+        int ty = y + (ch - (int)px - 3) / 2;
+        draw_text(s, x + 16, ty, w->buf, px,
+                  w->buf_len ? m3->on_surface : m3->on_surface_variant, cw - 32);
         if (focus) {
-            int caret_x = x + 10 + text_w_prefix(w->buf, w->caret, 14);
-            sfill(s, caret_x, y + 7, 1, ch - 14, app->c_accent);
+            int caret_x = x + 16 + text_w_prefix(w->buf, w->caret, px);
+            sfill(s, caret_x, ty - 2, 2, (int)px + 6, m3->primary);
         }
         break;
     }
     case IMUI_LIST: {
-        sround(s, x, y, cw, ch, 8, app->c_surface);
-        sstroke(s, x, y, cw, ch, app->c_border);
-        int rh = 40;
+        soutlined(s, x, y, cw, ch, M3_SHAPE_MEDIUM,
+                  m3->surface, m3->outline_variant, 1);
+        int rh = IMUI_LIST_ROW_H;
         int vis = (ch - 8) / rh;
         if ((int)w->scroll > (int)w->row_count - vis && (int)w->row_count > vis)
             w->scroll = w->row_count - vis;
@@ -687,33 +897,45 @@ static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
             imui_row_t *r = &w->rows[ri];
             int ry = y + 4 + i * rh;
             bool sel = ((int)ri == w->sel);
+            uint32_t on_row = m3->on_surface;
+            uint32_t on_row_dim = m3->on_surface_variant;
             if (sel) {
-                sfill(s, x + 3, ry, cw - 6, rh, app->c_selection);
-                sfill(s, x + 3, ry, 3, rh, app->c_accent);
+                /* A selected list item is a filled container, the way M3
+                 * marks one in a navigation drawer -- not a tinted wash
+                 * with a bar stuck on the side. */
+                sround(s, x + 4, ry + 2, cw - 8, rh - 4, sfull(cw - 8, rh - 4),
+                       m3->secondary_container);
+                on_row = on_row_dim = m3->on_secondary_container;
             }
-            if (r->icon) imui_icon(s, x + 12, ry + (rh - 22) / 2, 22, r->icon, app->c_text);
-            int tx = x + 44;
+            if (r->icon) imui_icon(s, x + 16, ry + (rh - 24) / 2, 24, r->icon, on_row);
+            int tx = x + (r->icon ? 56 : 20);
+            int avail = cw - (tx - x) - 16;
             if (r->subtext[0]) {
-                draw_text(s, tx, ry + 5, r->text, 13, app->c_text, cw - (tx - x) - 12);
-                draw_text(s, tx, ry + 21, r->subtext, 11, app->c_text_dim, cw - (tx - x) - 12);
+                draw_text(s, tx, ry + 10, r->text, app->type.body_large,
+                          on_row, avail);
+                draw_text(s, tx, ry + 10 + (int)app->type.body_large + 5,
+                          r->subtext, app->type.body_small, on_row_dim, avail);
             } else {
-                draw_text(s, tx, ry + (rh - 14) / 2, r->text, 13, app->c_text, cw - (tx - x) - 12);
+                draw_text(s, tx, ry + (rh - (int)app->type.body_large - 3) / 2,
+                          r->text, app->type.body_large, on_row, avail);
             }
         }
         if ((int)w->row_count > vis) {
             int track_h = ch - 8;
-            int th = track_h * vis / (int)w->row_count; if (th < 20) th = 20;
+            int th = track_h * vis / (int)w->row_count; if (th < 24) th = 24;
             int ty = w->row_count > (uint32_t)vis
                    ? (track_h - th) * (int)w->scroll / ((int)w->row_count - vis) : 0;
-            sround(s, x + cw - 6, y + 4 + ty, 3, th, 1, app->c_text_dim);
+            sround(s, x + cw - 8, y + 4 + ty, 4, th, 2, m3->outline);
         }
         break;
     }
     case IMUI_TEXTAREA: {
         bool focus = (app->focus == w);
-        sround(s, x, y, cw, ch, 8, app->c_surface);
-        sstroke(s, x, y, cw, ch, focus ? app->c_accent : app->c_border);
-        int lh = 18, pad = 8;
+        soutlined(s, x, y, cw, ch, M3_SHAPE_MEDIUM,
+                  m3->surface_container_lowest,
+                  focus ? m3->primary : m3->outline_variant, focus ? 2 : 1);
+        float px = app->type.body_medium;
+        int lh = (int)px + 6, pad = 12;
         int vis = (ch - 2 * pad) / lh;
         if (vis < 1) vis = 1;
         w->ta_vis = (uint32_t)vis;   /* page keys need a screenful; see handle_key */
@@ -737,7 +959,7 @@ static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
                 size_t n = (size_t)(e - p); if (n > sizeof(lbuf) - 1) n = sizeof(lbuf) - 1;
                 memcpy(lbuf, p, n); lbuf[n] = '\0';
                 draw_text(s, x + pad, y + pad + (int)(ln - w->ta_scroll) * lh,
-                          lbuf, 14, app->c_text, cw - 2 * pad);
+                          lbuf, px, m3->on_surface, cw - 2 * pad);
             }
             if (!*e) break;
             p = e + 1; ln++;
@@ -749,8 +971,8 @@ static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
             for (uint32_t i = 0; i < w->buf_len && k < cl; ++i) if (w->buf[i] == '\n') { k++; ls = w->buf + i + 1; }
             char cbuf[512]; uint32_t cn = cc < sizeof(cbuf) - 1 ? cc : sizeof(cbuf) - 1;
             memcpy(cbuf, ls, cn); cbuf[cn] = '\0';
-            int caret_x = x + pad + text_w(cbuf, 14);
-            sfill(s, caret_x, y + pad + (int)(cl - w->ta_scroll) * lh, 1, lh, app->c_accent);
+            int caret_x = x + pad + text_w(cbuf, px);
+            sfill(s, caret_x, y + pad + (int)(cl - w->ta_scroll) * lh, 2, lh, m3->primary);
         }
         break;
     }
@@ -758,6 +980,45 @@ static void paint(imui_app_t *app, surf_t *s, imui_widget_t *w) {
 }
 
 /* ------------------------------------------------------------- events */
+
+/* How many list rows fit in `w` as it is laid out now. The painter works
+ * this out too; both have to agree or the scroll limit is wrong. */
+static int list_visible_rows(const imui_widget_t *w) {
+    int vis = ((int)w->rh - 8) / IMUI_LIST_ROW_H;
+    return vis > 0 ? vis : 1;
+}
+
+static void list_scroll_by(imui_widget_t *w, int delta) {
+    int vis = list_visible_rows(w);
+    int max_scroll = (int)w->row_count - vis;
+    if (max_scroll < 0) max_scroll = 0;
+    int next = (int)w->scroll + delta;
+    if (next < 0) next = 0;
+    if (next > max_scroll) next = max_scroll;
+    w->scroll = (uint32_t)next;
+}
+
+/* Bring `sel` into view, moving the least that does it -- so arrowing off
+ * the bottom of a list scrolls instead of losing the selection. */
+static void list_scroll_to_selection(imui_widget_t *w) {
+    if (w->sel < 0) return;
+    int vis = list_visible_rows(w);
+    if (w->sel < (int)w->scroll) w->scroll = (uint32_t)w->sel;
+    else if (w->sel >= (int)w->scroll + vis)
+        w->scroll = (uint32_t)(w->sel - vis + 1);
+}
+
+static void textarea_scroll_by(imui_widget_t *w, int delta) {
+    uint32_t lines = 1u;
+    for (uint32_t i = 0; i < w->buf_len; ++i) if (w->buf[i] == '\n') ++lines;
+    int vis = (int)w->ta_vis > 0 ? (int)w->ta_vis : 1;
+    int max_scroll = (int)lines - vis;
+    if (max_scroll < 0) max_scroll = 0;
+    int next = (int)w->ta_scroll + delta;
+    if (next < 0) next = 0;
+    if (next > max_scroll) next = max_scroll;
+    w->ta_scroll = (uint32_t)next;
+}
 
 static imui_widget_t *hit(imui_widget_t *w, int x, int y) {
     if (x < w->rx || x >= w->rx + (int)w->rw || y < w->ry || y >= w->ry + (int)w->rh)
@@ -801,16 +1062,16 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
             if (f->on_submit) f->on_submit(app, f, f->user);
         } else if (!f->editable) {
             /* read-only: the caret still moves, nothing types */
-            if (ev->keycode == 0x4B && f->caret > 0) f->caret--;
-            else if (ev->keycode == 0x4D && f->caret < f->buf_len) f->caret++;
+            if (ev->keycode == KEY_LEFT && f->caret > 0) f->caret--;
+            else if (ev->keycode == KEY_RIGHT && f->caret < f->buf_len) f->caret++;
         } else if (ev->ascii == 8 || ev->ascii == 127) {
             if (f->caret > 0) {
                 memmove(f->buf + f->caret - 1, f->buf + f->caret, f->buf_len - f->caret + 1);
                 f->caret--; f->buf_len--;
                 if (f->on_change) f->on_change(app, f, f->user);
             }
-        } else if (ev->keycode == 0x4B && f->caret > 0) { f->caret--; }       /* left */
-        else if (ev->keycode == 0x4D && f->caret < f->buf_len) { f->caret++; } /* right */
+        } else if (ev->keycode == KEY_LEFT && f->caret > 0) { f->caret--; }       /* left */
+        else if (ev->keycode == KEY_RIGHT && f->caret < f->buf_len) { f->caret++; } /* right */
         else if (ev->ascii >= 32 && ev->ascii < 127 && f->buf_len + 1 < f->buf_cap) {
             memmove(f->buf + f->caret + 1, f->buf + f->caret, f->buf_len - f->caret + 1);
             f->buf[f->caret++] = (char)ev->ascii; f->buf_len++;
@@ -820,11 +1081,16 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
     } else if (f->kind == IMUI_TEXTAREA) {
         char c = (char)ev->ascii;
         bool ed = f->editable;
+        /* on_change means the buffer changed, not that a key was pressed:
+         * without this the arrow keys counted as an edit and every app
+         * using on_change (the editor's dirty flag above all) reported a
+         * modification the moment the caret moved. */
+        uint32_t before = f->buf_len;
         if (ed && (c == '\r' || c == '\n')) ta_insert(f, "\n", 1);
         else if (ed && (c == 8 || c == 127)) ta_backspace(f);
-        else if (ev->keycode == 0x4B) { if (f->caret > 0) f->caret--; }      /* left */
-        else if (ev->keycode == 0x4D) { if (f->caret < f->buf_len) f->caret++; } /* right */
-        else if (ev->keycode == 0x48) {                                       /* up */
+        else if (ev->keycode == KEY_LEFT) { if (f->caret > 0) f->caret--; }      /* left */
+        else if (ev->keycode == KEY_RIGHT) { if (f->caret < f->buf_len) f->caret++; } /* right */
+        else if (ev->keycode == KEY_UP) {                                       /* up */
             uint32_t bol = f->caret; while (bol > 0 && f->buf[bol - 1] != '\n') bol--;
             uint32_t col = f->caret - bol;
             if (bol > 0) {
@@ -832,14 +1098,14 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
                 uint32_t plen = bol - 1 - pbol;
                 f->caret = pbol + (col < plen ? col : plen);
             }
-        } else if (ev->keycode == 0x49 || ev->keycode == 0x51) {              /* page up/down */
+        } else if (ev->keycode == KEY_PAGEUP || ev->keycode == KEY_PAGEDOWN) {   /* page up/down */
             /* A screenful is however many lines fit, which only the paint pass
              * knows (it has the pane height); it leaves the count in ta_vis.
              * Before the first paint there is none, so fall back to a
              * plausible one. */
             uint32_t step = f->ta_vis ? f->ta_vis : 16u;
             for (uint32_t i = 0; i < step; ++i) {
-                if (ev->keycode == 0x49) {
+                if (ev->keycode == KEY_PAGEUP) {
                     if (f->caret == 0) break;
                     uint32_t b = f->caret; while (b > 0 && f->buf[b - 1] != '\n') b--;
                     f->caret = (b > 0) ? b - 1 : 0;
@@ -850,7 +1116,7 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
                     f->caret = e2 + 1;
                 }
             }
-        } else if (ev->keycode == 0x50) {                                     /* down */
+        } else if (ev->keycode == KEY_DOWN) {                                    /* down */
             uint32_t eol = f->caret; while (eol < f->buf_len && f->buf[eol] != '\n') eol++;
             uint32_t bol = f->caret; while (bol > 0 && f->buf[bol - 1] != '\n') bol--;
             uint32_t col = f->caret - bol;
@@ -862,13 +1128,30 @@ static void handle_key(imui_app_t *app, const input_keyboard_event_t *ev) {
             }
         } else if (ed && c >= 32 && c < 127) { char cc = c; ta_insert(f, &cc, 1); }
         else if (ed && c == '\t') ta_insert(f, "    ", 4);
-        if (ed && f->on_change) f->on_change(app, f, f->user);
+        if (ed && f->buf_len != before && f->on_change) f->on_change(app, f, f->user);
         app->needs_paint = true;
     } else if (f->kind == IMUI_LIST) {
-        if (ev->keycode == 0x48 && f->sel > 0) f->sel--;                      /* up */
-        else if (ev->keycode == 0x50 && f->sel + 1 < (int)f->row_count) f->sel++; /* down */
+        if (ev->keycode == KEY_UP && f->sel > 0) f->sel--;                      /* up */
+        else if (ev->keycode == KEY_DOWN && f->sel + 1 < (int)f->row_count) f->sel++; /* down */
+        else if (ev->keycode == KEY_PAGEUP || ev->keycode == KEY_PAGEDOWN) {
+            /* Page must move the selection, not just the viewport: a bare
+             * scroll is undone straight afterwards by the
+             * scroll-to-selection pass below, which is why PgUp/PgDn used
+             * to leave the list exactly where it was. */
+            int page = list_visible_rows(f);
+            int next = (int)f->sel;
+            if (next < 0) next = (ev->keycode == KEY_PAGEUP) ? 0 : page - 1;
+            else next += (ev->keycode == KEY_PAGEUP) ? -page : page;
+            if (next < 0) next = 0;
+            if (next > (int)f->row_count - 1) next = (int)f->row_count - 1;
+            f->sel = f->row_count ? next : -1;
+        }
+        else if (ev->keycode == KEY_HOME) { f->sel = f->row_count ? 0 : -1; }       /* Home */
+        else if (ev->keycode == KEY_END && f->row_count)
+            f->sel = (int)f->row_count - 1;                                     /* End */
         else if ((ev->ascii == '\r' || ev->ascii == '\n') && f->sel >= 0 && f->on_activate)
             f->on_activate(app, f, f->user);
+        list_scroll_to_selection(f);
         app->needs_paint = true;
     }
 }
@@ -906,15 +1189,18 @@ int imui_run(imui_app_t *app) {
                     else
                         app->focus = NULL;
                     if (h->kind == IMUI_LIST) {
-                        int rh2 = 40;
-                        int idx = (int)h->scroll + (my - (h->ry + 4)) / rh2;
+                        int idx = (int)h->scroll +
+                                  (my - (h->ry + 4)) / IMUI_LIST_ROW_H;
                         if (idx >= 0 && idx < (int)h->row_count) {
-                            static uint64_t last_ms; static int last_idx;
                             uint64_t now = get_uptime_ms();
-                            bool dbl = (idx == last_idx && now - last_ms < 350);
+                            bool dbl = (idx == h->dbl_idx &&
+                                        now - h->dbl_ms < 350u);
                             h->sel = idx;
-                            last_ms = now; last_idx = idx;
-                            if (dbl && h->on_activate) h->on_activate(app, h, h->user);
+                            h->dbl_ms = now; h->dbl_idx = idx;
+                            /* A list of files opens on a double click; a
+                             * list of settings acts on the first one. */
+                            if ((dbl || h->single_click) && h->on_activate)
+                                h->on_activate(app, h, h->user);
                         }
                     }
                 }
@@ -925,6 +1211,24 @@ int imui_run(imui_app_t *app) {
                 clear_hover(app->root);
                 if (h) h->hover = true;
             }
+            /* The wheel scrolls whatever it is over. Without this the only
+             * way down a list was its scrollbar, which is not draggable
+             * either -- so anything past the first screenful of a list was
+             * simply unreachable. */
+            if (me.wheel != 0) {
+                imui_widget_t *target = h;
+                while (target && target->kind != IMUI_LIST &&
+                       target->kind != IMUI_TEXTAREA)
+                    target = target->parent;
+                if (target) {
+                    int step = me.wheel > 0 ? -3 : 3;
+                    if (target->kind == IMUI_LIST)
+                        list_scroll_by(target, step);
+                    else
+                        textarea_scroll_by(target, step);
+                    app->needs_paint = true;
+                }
+            }
             prev_btn = btn;
             if (mx != prev_mx || my != prev_my) mouse_moved = true;
             prev_mx = mx; prev_my = my;
@@ -933,7 +1237,15 @@ int imui_run(imui_app_t *app) {
 
         input_keyboard_event_t ke;
         while (window_input_keyboard_poll(&ke) > 0) {
-            if (ke.pressed) handle_key(app, &ke);
+            if (!ke.pressed) continue;
+            /* App shortcuts first: they have to work with the focus
+             * anywhere, including on a widget that would otherwise swallow
+             * the key (Ctrl+S while the caret sits in the text). */
+            if (app->on_key && app->on_key(app, &ke)) {
+                app->needs_paint = true;
+                continue;
+            }
+            handle_key(app, &ke);
         }
 
         if (app->needs_layout) {
@@ -943,7 +1255,7 @@ int imui_run(imui_app_t *app) {
         }
         if (app->needs_paint) {
             surf_t s = { app->fb, (int)app->fb_w, (int)app->fb_h };
-            sfill(&s, 0, 0, s.w, s.h, app->c_bg);
+            sfill(&s, 0, 0, s.w, s.h, app->color.surface);
             paint(app, &s, app->root);
             window_damage(app->win, 0, 0, app->fb_w, app->fb_h);
             app->needs_paint = false;

@@ -31,6 +31,7 @@
 #define WM_WINDOW_CREATED      41
 #define WM_WINDOW_DESTROYED    42
 #define WM_WINDOW_MOVED        43
+#define WM_WINDOW_RESIZED      44
 
 #define WM_REGISTER_SERVICE    50
 #define WM_GET_DISPLAY_INFO    51
@@ -78,6 +79,18 @@ typedef struct {
     uint32_t request_id;
     uint32_t window_id;
 } wm_msg_header_t;
+
+/* Pushed to a window's owner whenever the compositor changes the size of its
+ * content area. The backing store is a shared-memory object sized to that
+ * area, so a resize replaces it: the handle the client mapped is closed and a
+ * new one takes its place. Without this notification a client that cached the
+ * mapping kept drawing into the orphaned buffer and its window froze on the
+ * last frame before the resize. See window_poll_resize(). */
+typedef struct {
+    wm_msg_header_t header;
+    uint32_t width;
+    uint32_t height;
+} wm_window_resized_t;
 
 typedef struct {
     wm_msg_header_t header;

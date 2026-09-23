@@ -6,13 +6,21 @@
  * An app links this (it is part of the shared API objects), creates an
  * imui_app_t, builds a widget tree either in C or from an XML string
  * (imui_load_xml), sets callbacks, and calls imui_run(). Rendering is
- * client-side into the window backing store with a palette that mirrors
- * the window manager's plasma.theme, so apps look at home on the desktop.
+ * client-side into the window backing store.
+ *
+ * Every widget is a Material Design 3 component drawn from the tokens in
+ * API/Source/Material.h, and the scheme is read at startup from the theme
+ * file the window manager is using (m3_load_desktop_theme), so an app
+ * follows the desktop -- including a retint or a switch to the dark scheme
+ * -- without knowing anything about it.
  *
  * Widget tree (all via imui_add / imui_label / ... helpers):
- *   IMUI_ROW / IMUI_COL   flex container (pad, gap, per-child grow)
+ *   IMUI_ROW / IMUI_COL   flex container (pad, gap, per-child grow). With
+ *                         fill_bg it is an M3 outlined card, or -- set to
+ *                         IMUI_FILLED -- an edge-to-edge toolbar bar.
  *   IMUI_LABEL            static / dynamic text
- *   IMUI_BUTTON           text (+ optional leading icon), on_click
+ *   IMUI_BUTTON           text (+ optional leading icon), on_click;
+ *                         M3 emphasis chosen with imui_set_variant()
  *   IMUI_ICONBUTTON       icon only (toolbars), on_click
  *   IMUI_DIVIDER          1px separator
  *   IMUI_SPACER           flexible gap (grow=1)
@@ -29,6 +37,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "Input.h"
+#include "Material.h"
+
 typedef enum {
     IMUI_ICON_NONE = 0,
     IMUI_ICON_FOLDER, IMUI_ICON_FOLDER_OPEN, IMUI_ICON_FILE, IMUI_ICON_DRIVE,
@@ -43,10 +54,32 @@ typedef enum {
     IMUI_DIVIDER, IMUI_SPACER, IMUI_TEXTBOX, IMUI_LIST, IMUI_TEXTAREA,
 } imui_kind_t;
 
+/* Material Design 3's button emphasis ladder, highest first. A toolbar
+ * wants IMUI_TEXT (the default); the one action a dialog is asking for
+ * wants IMUI_FILLED; the rest sit in between. */
+typedef enum {
+    IMUI_TEXT = 0,
+    IMUI_FILLED,
+    IMUI_TONAL,
+    IMUI_OUTLINED,
+} imui_variant_t;
+
+/* Which M3 type role a label is set in. */
+typedef enum {
+    IMUI_BODY = 0,      /* body-medium -- running text, the default      */
+    IMUI_TITLE,         /* title-medium -- the name of a pane or section */
+    IMUI_HEADLINE,      /* headline-small -- one per window at most      */
+    IMUI_LABEL_SMALL,   /* label-small -- captions, status, units        */
+} imui_type_role_t;
+
 typedef struct imui_widget imui_widget_t;
 typedef struct imui_app imui_app_t;
 
 typedef void (*imui_cb_t)(imui_app_t *app, imui_widget_t *w, void *user);
+/* Runs before the focused widget sees a key, so an app can take a shortcut
+ * (Ctrl+S and friends) no matter where the focus is. Return true to consume
+ * the event; false hands it to the widget as usual. */
+typedef bool (*imui_key_cb_t)(imui_app_t *app, const input_keyboard_event_t *ev);
 
 typedef struct {
     imui_icon_t icon;
@@ -67,6 +100,9 @@ struct imui_widget {
     /* content */
     char        text[192];
     imui_icon_t icon;
+    imui_variant_t  variant;    /* buttons: M3 emphasis     */
+    imui_type_role_t type_role; /* labels: M3 type role     */
+    bool     single_click;      /* lists: activate on the first click */
 
     /* list */
     imui_row_t *rows;
@@ -97,6 +133,10 @@ struct imui_widget {
     /* computed each frame */
     int32_t rx, ry; uint32_t rw, rh;
     bool    hover, pressed;
+    /* Double-click recognition, kept per list rather than per app: two
+     * lists both clicked on row 0 within 350 ms are two single clicks. */
+    uint64_t dbl_ms;
+    int32_t  dbl_idx;
 };
 
 struct imui_app {
@@ -114,9 +154,15 @@ struct imui_app {
      * file descriptor, a socket, a clock -- polls it from here instead of
      * writing its own event loop. `w` is the root widget. */
     imui_cb_t   on_tick;
-    /* palette (mirrors plasma.theme) */
-    uint32_t c_bg, c_surface, c_surface_alt, c_hover, c_text, c_text_dim,
-             c_accent, c_accent_soft, c_border, c_danger, c_selection;
+    /* Every pressed key goes here first; see imui_key_cb_t. NULL (the
+     * default) means the focused widget handles every key, as before. */
+    imui_key_cb_t on_key;
+    /* The desktop's Material Design 3 scheme and type scale, loaded from the
+     * shell's theme file. An app may overwrite individual roles after
+     * imui_create() if it really has to, but the point of having them here
+     * is that it does not. */
+    m3_scheme_t     color;
+    m3_typescale_t  type;
 };
 
 /* lifecycle */
@@ -135,6 +181,15 @@ imui_widget_t *imui_button(imui_widget_t *parent, const char *text,
                            imui_icon_t icon, imui_cb_t cb, void *user);
 imui_widget_t *imui_iconbutton(imui_widget_t *parent, imui_icon_t icon,
                                imui_cb_t cb, void *user);
+
+/* Set a button's M3 emphasis, or a label's M3 type role. Both return the
+ * widget so they can be chained onto the call that created it. */
+imui_widget_t *imui_set_variant(imui_widget_t *button, imui_variant_t variant);
+
+/* Make a list fire on_activate on a single click instead of a double one.
+ * A list of actions wants this; a list of files does not. */
+imui_widget_t *imui_set_single_click(imui_widget_t *list, bool enable);
+imui_widget_t *imui_set_type_role(imui_widget_t *label, imui_type_role_t role);
 imui_widget_t *imui_spacer(imui_widget_t *parent);
 imui_widget_t *imui_divider(imui_widget_t *parent);
 imui_widget_t *imui_textbox(imui_widget_t *parent, const char *text);

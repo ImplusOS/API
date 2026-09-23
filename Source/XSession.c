@@ -103,6 +103,8 @@ int32_t xsession_open(xsession_t *session, const char *title,
     session->window = 0u;
     session->width = 0u;
     session->height = 0u;
+    session->surface_w = 0u;
+    session->surface_h = 0u;
     session->mirrored = 0;
     session->joined = 0;
     session->buttons = 0u;
@@ -127,6 +129,8 @@ int32_t xsession_open(xsession_t *session, const char *title,
                 display_kms_set_mirror(pixels, w, h) == 0) {
                 session->width = w;
                 session->height = h;
+                session->surface_w = w;
+                session->surface_h = h;
                 session->mirrored = 1;
                 /* The backing store starts fully transparent and X only ever
                  * writes RGB -- it never sets an alpha byte -- so without this
@@ -319,6 +323,43 @@ static void xsession_timing_note(xsession_t *session, uint64_t spawned_ms)
 }
 #endif
 
+/* Point the mirror at the window's current backing store.
+ *
+ * A resize replaces that surface: the window manager allocates a new
+ * shared-memory object, hands the owner the new handle and closes the old
+ * one. The mirror still names the pages of the surface X was drawing into, so
+ * without this every frame after the first resize lands somewhere the
+ * compositor no longer reads and the window sits on its last pre-resize frame.
+ *
+ * The mirror is released before the old mapping is dropped, not after: the
+ * pages go back to the allocator with the last mapping, and a flip arriving in
+ * between would memcpy into memory that is no longer ours. Flips are dropped
+ * while no mirror is registered, which costs at most one frame.
+ *
+ * X reads the connector's mode once at startup, so it keeps rendering at the
+ * size the window had then; the blit clips to whichever of the two is smaller.
+ * Growing a window leaves the new margin at the background colour until the
+ * server can be told to change modes (RandR is not wired up yet). */
+static bool xsession_rebind_mirror(xsession_t *session)
+{
+    (void)display_kms_set_mirror(0, 0u, 0u);
+    session->mirrored = 0;
+
+    uint32_t w = 0u, h = 0u;
+    uint32_t *pixels = window_get_backing_store(session->window, &w, &h);
+    if (pixels == NULL || w == 0u || h == 0u ||
+        display_kms_set_mirror(pixels, w, h) != 0) {
+        return false;
+    }
+
+    session->surface_w = w;
+    session->surface_h = h;
+    session->mirrored = 1;
+    (void)window_set_surface_opaque(session->window, true);
+    window_damage(session->window, 0u, 0u, w, h);
+    return true;
+}
+
 int32_t xsession_run(xsession_t *session, const char *path, const char *args)
 {
     if (session == NULL || path == NULL) {
@@ -343,16 +384,31 @@ int32_t xsession_run(xsession_t *session, const char *path, const char *args)
     }
 
     int32_t status = 0;
+    /* Only a session that redirected scanout has a mirror to re-point; when X
+     * drives the panel there is no surface tied to the window's size. */
+    const bool mirror_owned = session->mirrored != 0;
+    bool rebind_mirror = false;
     for (;;) {
         int32_t reaped = process_waitpid(pid, &status, 0);
         if (reaped == pid) break;   /* exited, status valid */
         if (reaped < 0) break;      /* no such child */
         if (session->window != 0u) {
             xsession_forward_input(session);
+            uint32_t new_w = 0u, new_h = 0u;
+            if (window_poll_resize(session->window, &new_w, &new_h) > 0 &&
+                mirror_owned &&
+                (new_w != session->surface_w || new_h != session->surface_h)) {
+                rebind_mirror = true;
+            }
+            /* Stays set until a rebind succeeds: dropping the window here
+             * would strand X drawing into a surface nothing composites. */
+            if (rebind_mirror && xsession_rebind_mirror(session)) {
+                rebind_mirror = false;
+            }
         }
         if (session->mirrored && display_kms_mirror_take_dirty()) {
             window_damage(session->window, 0u, 0u,
-                          session->width, session->height);
+                          session->surface_w, session->surface_h);
 #if XSESSION_TIMING
             xsession_timing_note(session, spawned_ms);
 #endif
