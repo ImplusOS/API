@@ -4,6 +4,7 @@
 
 #include "Graphics.h"
 #include "Input.h"
+#include "LinuxEnv.h"
 #include "Process.h"
 #include "Serial.h"
 #include "Socket.h"
@@ -149,7 +150,19 @@ int32_t xsession_open(xsession_t *session, const char *title,
         }
     }
 
-    session->xorg_pid = process_spawn_with_arg(XORG_PATH, XORG_ARGS);
+    /* The server's own environment is built here, not in the kernel: the
+     * libgbm preload and the eager binding below are Xorg's problems, and
+     * the display/xkb/Mesa variables are what every client of this server
+     * needs as well (xsession_run_env() gives them theirs). */
+    {
+        linux_env_t xorg_env;
+        linux_env_init(&xorg_env);
+        linux_env_add_x11(&xorg_env);
+        linux_env_add_desktop(&xorg_env);
+        linux_env_add_xorg_server(&xorg_env);
+        session->xorg_pid = process_spawn_with_env(XORG_PATH, XORG_ARGS,
+                                                   linux_env_entries(&xorg_env));
+    }
     if (session->xorg_pid <= 0) {
         serial_write_string("[xsession] failed to spawn Xorg\n");
         xsession_close(session);
@@ -362,15 +375,36 @@ static bool xsession_rebind_mirror(xsession_t *session)
 
 int32_t xsession_run(xsession_t *session, const char *path, const char *args)
 {
+    return xsession_run_env(session, path, args, NULL);
+}
+
+int32_t xsession_run_env(xsession_t *session, const char *path, const char *args,
+                         const char *const *extra_envp)
+{
     if (session == NULL || path == NULL) {
         return -1;
+    }
+
+    /* Every client of this server needs the same shared environment -- the
+     * display, Mesa's software rasteriser, and the desktop stack a
+     * GTK/GLib/fontconfig program assumes -- and `extra_envp` adds whatever
+     * this one program needs on top of it (Doom's IWAD directory, say).
+     * Assembled here rather than in the kernel: which display a client uses
+     * is the session's business, and the kernel has never heard of Doom. */
+    linux_env_t env;
+    linux_env_init(&env);
+    linux_env_add_x11(&env);
+    linux_env_add_desktop(&env);
+    for (uint32_t i = 0; extra_envp != NULL && extra_envp[i] != NULL; ++i) {
+        (void)linux_env_add(&env, extra_envp[i]);
     }
 
 #if XSESSION_TIMING
     uint64_t spawned_ms = xsession_timing_now_ms();
 #endif
-    int32_t pid = (args != NULL) ? process_spawn_with_arg(path, args)
-                                 : process_spawn(path);
+    int32_t pid = process_spawn_with_env(path,
+                                         (args != NULL) ? args : "",
+                                         linux_env_entries(&env));
     if (pid < 0) {
         return -1;
     }

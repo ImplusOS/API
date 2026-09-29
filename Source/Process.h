@@ -9,6 +9,12 @@ void process_yield(void);
 int32_t process_get_current_pid(void);
 int32_t process_spawn(const char *path);
 int32_t process_spawn_with_arg(const char *path, const char *argument);
+/* Spawn with a caller-supplied environment: `envp` is a NULL-terminated array
+ * of "NAME=VALUE" pointers (build one with API/Source/LinuxEnv.c), or NULL
+ * for the kernel's generic defaults alone. Application-specific environment
+ * belongs to the launcher, never to the kernel. */
+int32_t process_spawn_with_env(const char *path, const char *argument,
+                               const char *const *envp);
 /* The uid/gid Linux programs this process spawns from now on will run as.
  * (uint32_t)-1 leaves a value unchanged. */
 int32_t process_set_credentials(uint32_t uid, uint32_t gid);

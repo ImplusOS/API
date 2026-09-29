@@ -53,7 +53,17 @@ int32_t xsession_open(xsession_t *session, const char *title,
 
 /* Spawn `path` as an X client (`args` may be NULL) and pump the mirror until
  * it exits. Returns the client's exit status, or a negative value if it could
- * not be started. */
+ * not be started.
+ *
+ * The child gets an environment assembled here, not in the kernel: the
+ * display and Mesa variables every X client needs, plus the desktop-stack
+ * variables GTK/GLib/fontconfig programs read, plus anything `extra_envp`
+ * adds (a NULL-terminated "NAME=VALUE" array; see API/Source/LinuxEnv.c). */
+int32_t xsession_run_env(xsession_t *session, const char *path, const char *args,
+                         const char *const *extra_envp);
+
+/* xsession_run_env() with nothing extra: the shared X-client environment
+ * alone, which is what Chromium, FireFox and the terminal all run on. */
 int32_t xsession_run(xsession_t *session, const char *path, const char *args);
 
 /* Release the window and the mirror, and stop the server if this session was
