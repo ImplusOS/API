@@ -39,9 +39,102 @@
 
 /* Frame pacing while a client is running. The mirror is repainted only when
  * the server actually produced a frame, so this is a poll interval, not a
- * refresh rate. */
-#define XSESSION_FRAME_MS 16u
+ * refresh rate -- but it is also the interval at which queued input reaches
+ * the client, so it is kept at the scheduler-tick floor rather than a frame
+ * time: a keystroke waiting the full 16 ms here is a keystroke the user feels
+ * as "the OS is slow". */
+#define XSESSION_FRAME_MS 1u
 #define XSESSION_IDLE_MS  200u
+
+/* Userland half of the [ktr] keystroke stage trace; the kernel half is
+ * Kernel/Source/Debug/KeyTrace.h. Same tag, same clock (get_uptime_ms()
+ * reads the counter kernel-side key_trace_ms() derives), so the deltas
+ * between a kernel line and a userland line are real. Off unless the build
+ * passes -DKEY_TRACE=1 -- see EXTRA_USERLAND_CFLAGS. */
+#ifndef KEY_TRACE
+#define KEY_TRACE 0
+#endif
+
+/* [ktr] PS: a keystroke was forwarded to the X server. Frames are logged
+ * only while one is owed to a keystroke -- the server repaints on a timer of
+ * its own, and tracing every one of those would flood COM1 (the flood itself
+ * would then be the bottleneck being measured). */
+static uint32_t s_key_owed = 0u;
+
+#if KEY_TRACE
+/* Same single-call shape as the kernel's key_trace(): two serial_write_string()
+ * calls would let another CPU's line land between the stamp and the tag. */
+static void xsession_key_trace(const char *stage, uint32_t detail)
+{
+    char line[80];
+    uint64_t ms = get_uptime_ms();
+    uint32_t n = 0u;
+    char digits[20];
+    uint32_t nd = 0u;
+
+    line[n++] = '[';
+    line[n++] = 'k';
+    line[n++] = 't';
+    line[n++] = 'r';
+    line[n++] = ']';
+    line[n++] = ' ';
+    while (*stage != '\0' && n < sizeof(line) - 32u) {
+        line[n++] = *stage++;
+    }
+    line[n++] = ' ';
+    do {
+        digits[nd++] = (char)('0' + (char)(ms % 10u));
+        ms /= 10u;
+    } while (ms != 0u);
+    while (nd != 0u) {
+        line[n++] = digits[--nd];
+    }
+    line[n++] = ' ';
+    do {
+        digits[nd++] = (char)('0' + (char)(uint64_t)(detail % 10u));
+        detail /= 10u;
+    } while (detail != 0u);
+    while (nd != 0u) {
+        line[n++] = digits[--nd];
+    }
+    line[n++] = '\n';
+    line[n] = '\0';
+    serial_write_string(line);
+}
+
+static void xsession_key_trace_frame(void)
+{
+#if KEY_TRACE
+    /* Rate-limit frame logging to avoid flooding COM1: one line per frame
+     * while a keystroke is owed, then stop after the first frame that
+     * actually shows the keystroke result (we can't know which it is from
+     * here, so we just log a few frames). This fixes the attribution bug
+     * where an unrelated dirty frame (e.g. cursor blink) would consume the
+     * MD marker and mis-attribute the latency. */
+    static uint32_t s_frame_count = 0u;
+    if (s_key_owed != 0u) {
+        xsession_key_trace("MD", s_frame_count);
+        s_frame_count++;
+        if (s_frame_count >= 4u) {
+            s_key_owed = 0u;
+            s_frame_count = 0u;
+        }
+    } else {
+        s_frame_count = 0u;
+    }
+#endif
+}
+#else
+static void xsession_key_trace(const char *stage, uint32_t detail)
+{
+    (void)stage;
+    (void)detail;
+}
+
+static void xsession_key_trace_frame(void)
+{
+}
+#endif
 
 static int server_is_listening(void)
 {
@@ -247,6 +340,11 @@ static void xsession_forward_input(xsession_t *session)
         if (code == 0u) {
             continue;
         }
+        /* [ktr] PS: the X session's pump loop picked the key up out of the
+         * window's IPC queue. RD->PS is window-manager routing plus how long
+         * this loop had left to sleep; PS->IN is just the inject syscall. */
+        xsession_key_trace("PS", (uint32_t)code);
+        s_key_owed = 1u;
         (void)input_evdev_inject(0u, LX_EV_KEY, code, key.pressed ? 1 : 0);
         (void)input_evdev_inject(0u, LX_EV_SYN, LX_SYN_REPORT, 0);
     }
@@ -443,6 +541,11 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
         if (session->mirrored && display_kms_mirror_take_dirty()) {
             window_damage(session->window, 0u, 0u,
                           session->surface_w, session->surface_h);
+            /* [ktr] MD: the X server has produced the frame that answers the
+             * last keystroke. OUT->MD is X delivering the key plus the client
+             * painting it; MD->(next pixel change) is window-manager
+             * compositing and scanout. */
+            xsession_key_trace_frame();
 #if XSESSION_TIMING
             xsession_timing_note(session, spawned_ms);
 #endif
