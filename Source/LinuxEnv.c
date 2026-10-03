@@ -70,6 +70,11 @@ static void linux_env_add_list(linux_env_t *env, const char *const *list)
 void linux_env_add_x11(linux_env_t *env)
 {
     static const char *const group[] = {
+        /* Keep the runtime path explicit in every foreign GUI launch.  The
+         * kernel also supplies this for the glibc PT_INTERP case, but the
+         * loader must receive it in the initial envp: Xorg/GTK invoke the
+         * dynamic linker before their own code can repair a missing path. */
+        "LD_LIBRARY_PATH=/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib",
         /* The server XSession brought up (or joined) listens on the Unix
          * socket /tmp/.X11-unix/X0. Xlib does not fall back to ":0": with no
          * DISPLAY in the environment, XOpenDisplay(NULL) hands a NULL display
@@ -82,6 +87,19 @@ void linux_env_add_x11(linux_env_t *env)
          * llvmpipe is the only driver that can draw at all. */
         "LIBGL_ALWAYS_SOFTWARE=1",
         "GALLIUM_DRIVER=llvmpipe",
+        /* ...and which DRI driver Mesa binds is decided before any of that:
+         * loader_get_driver_for_fd() returns MESA_LOADER_DRIVER_OVERRIDE
+         * unconditionally (it is checked first, ahead of LIBGL_ALWAYS_SOFTWARE
+         * and ahead of the PCI-id lookup), and "kms_swrast" is the one that
+         * combines dumb-buffer KMS with software rasterisation -- exactly what
+         * the kernel's DRM shim implements. This sits in the *X-client* group
+         * rather than the X-server one because the PCI-id fallback would
+         * otherwise pick "virtio_gpu" (the display adapter's real vendor/device
+         * id) for any Mesa process launched without the server's environment,
+         * and virtio_gpu_dri.so has no counterpart in the shim. Every client
+         * path -- xsession_run_env(), the gtk3 demo, Chromium -- goes through
+         * here. */
+        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
         /* llvmpipe's scene/command-handoff worker threads race the main
          * thread's JIT'd raster kernel under our SMP scheduler; the torn read
          * showed up as a #GP on a user-mode deref of garbage rax at the first
@@ -163,6 +181,23 @@ void linux_env_add_xorg_server(linux_env_t *env)
          * with "undefined symbol: gbm_bo_get_plane_count". linux_env_add()
          * refuses a duplicate key for the same reason. */
         "LD_PRELOAD=libgbm.so.1",
+        /* Mesa's loader checks MESA_LOADER_DRIVER_OVERRIDE before
+         * LIBGL_ALWAYS_SOFTWARE.  Without this override LIBGL_ALWAYS_SOFTWARE=1
+         * (set by linux_env_add_x11) makes loader_get_driver() return "swrast",
+         * which is the pure software renderer with no KMS support — so
+         * gbm_create_device() fails to create a screen and glamor reports
+         * "couldn't get display device".  "kms_swrast" is the DRI driver that
+         * combines dumb-buffer KMS with software rasterisation, which is
+         * exactly what our DRM shim provides.  GALLIUM_DRIVER=llvmpipe (from
+         * the x11 group) still selects llvmpipe for the actual rasteriser.
+         * NOTE: linux_env_add_x11() now sets this too (for X clients, which
+         * never get this group); the duplicate add here is refused and the
+         * first -- identical -- value stands. */
+        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
+        /* Explicit GBM backend search path: Mesa's compile-time default may
+         * differ from ImplusOS's layout, and gbm_create_device() dlopen()s
+         * <path>/dri_gbm.so (or gbm_dri.so) from here. */
+        "GBM_BACKENDS_PATH=/usr/lib/x86_64-linux-gnu/gbm",
         /* Bind every relocation at load time. Two reasons:
          * (1) boot 7 proved libglx.so resolves cleanly under eager binding
          *     but a *lazy* PLT fixup for one of its symbols dies at
