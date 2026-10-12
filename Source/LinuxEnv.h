@@ -77,6 +77,10 @@ void linux_env_add_xorg_server(linux_env_t *env);
  * that keep libopenal from aborting on a device this OS does not have. */
 void linux_env_add_doom(linux_env_t *env);
 
+/* Wine's Unix loader and wineserver share a prefix on the writable tmpfs.
+ * The X11/Mesa variables still come from linux_env_add_x11(). */
+void linux_env_add_wine(linux_env_t *env);
+
 /* The in-tree test ld.so (com.ImplusOS.dynmain / com.ImplusOS.ldso): where it
  * finds its libraries and the preload shim it runs the test app under. Only a
  * launcher of an ELF whose PT_INTERP is that ld.so should add this -- glibc's

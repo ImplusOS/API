@@ -237,6 +237,38 @@ void linux_env_add_doom(linux_env_t *env)
     linux_env_add_list(env, group);
 }
 
+void linux_env_add_wine(linux_env_t *env)
+{
+    static const char *const group[] = {
+        /* The image has no persistent home volume. Wine's prefix is a
+         * writable tmpfs directory and is recreated on each boot, which is
+         * sufficient for winecfg and for a Windows program supplied in the
+         * launch argument. */
+        "WINEPREFIX=/tmp/wine",
+        "WINEARCH=win64",
+        /* The staged /usr/bin/wineserver entry is Debian's shell wrapper.
+         * ImplusOS process_spawn executes ELF files directly, so Wine must
+         * be pointed at the real 64-bit server executable instead of waiting
+         * forever for an unlaunchable wrapper. */
+        "WINESERVER=/usr/lib/wine/wineserver64",
+        "PATH=/usr/bin:/usr/lib/wine:/bin",
+        /* Debian keeps the Unix/PE Wine modules below the multiarch path.
+         * The Debian shell wrapper normally establishes this indirectly;
+         * ImplusOS enters wine64 directly from the ELF launcher. */
+        "WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix:/usr/lib/x86_64-linux-gnu/wine/x86_64-windows",
+        /* Avoid Wine's secondary loader exec: the native launcher already
+         * entered the final wine64 ELF and ImplusOS has no shebang/alternatives
+         * exec path for that hand-off. */
+        "WINELOADERNOEXEC=1",
+        /* There is no menu database or D-Bus session to update. Disabling
+         * this optional helper avoids a needless wineserver child during
+         * prefix creation. */
+        "WINEDLLOVERRIDES=winemenubuilder.exe=d",
+        NULL,
+    };
+    linux_env_add_list(env, group);
+}
+
 void linux_env_add_implus_ldso(linux_env_t *env)
 {
     static const char *const group[] = {
