@@ -2,9 +2,10 @@
 
 /*
  * WiFi.h -- userland surface for the Wi-Fi management plane exposed by
- * whichever active NIC driver supports it (today: AX900, see
- * Kernel/Drivers/Wi-Fi/AX900/AX900.c). Syscall numbers and
- * semantics are defined in Kernel/Core/syscall/Syscall_Main.h
+ * whichever NIC driver supports it (see driver_nic_t's wifi_* ops in
+ * Kernel/Drivers/Module/DriverBinary.h, and
+ * Kernel/Drivers/Wi-Fi/AIC8800/ for the implementation). Syscall numbers
+ * and semantics are defined in Kernel/Core/syscall/Syscall_Main.h
  * (SYSCALL_WIFI_*) and Syscall_Dispatch.c.
  *
  * The structs below are a byte-for-byte mirror of driver_wifi_scan_result_t
@@ -63,13 +64,12 @@ bool wifi_scan_start(void);
 uint32_t wifi_get_scan_results(wifi_scan_result_t *out, uint32_t max_count);
 
 /* psk == NULL connects to an open network. A non-NULL psk (8-63 ASCII
- * chars, per IEEE 802.11-2020) attempts WPA2-PSK -- see AX900.c /
- * AX900_Protocol.h for why that path is labeled experimental: the RSN IE
- * this driver builds is spec-correct, but exactly how the passphrase
- * reaches AICSemi's firmware over this transport is unconfirmed. Returns
- * once the driver has *sent* the connect request and gotten a first
- * positive ack, not once actually associated -- poll wifi_get_status()
- * for that. */
+ * chars, per IEEE 802.11-2020) attempts WPA2-PSK: the connect request
+ * programs the RSN parameters into the firmware and associates, then the
+ * driver runs the 4-way handshake itself (see AIC8800_Wpa.c) and reports
+ * ASSOCIATED only once the keys are installed. Returns once the driver
+ * has *sent* the connect request and gotten a first positive ack, not
+ * once actually associated -- poll wifi_get_status() for that. */
 bool wifi_connect(const char *ssid, const char *psk);
 void wifi_disconnect(void);
 void wifi_get_status(wifi_status_t *out_status);

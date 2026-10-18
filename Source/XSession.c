@@ -35,7 +35,7 @@
  * Xorg dynamic-links ~40 shared objects and runs xkbcomp twice, so how long
  * that takes is wildly load-dependent under TCG. */
 #define XORG_READY_TIMEOUT_MS 120000u
-#define XORG_POLL_INTERVAL_MS 50u
+#define XORG_POLL_INTERVAL_MS 10u
 
 /* Frame pacing while a client is running. The mirror is repainted only when
  * the server actually produced a frame, so this is a poll interval, not a
@@ -45,6 +45,13 @@
  * as "the OS is slow". */
 #define XSESSION_FRAME_MS 1u
 #define XSESSION_IDLE_MS  200u
+
+/* A foreign client has no blocking wait primitive for both child exit and
+ * window input yet.  Keep the first pass at the low-latency floor, but back
+ * off while the client is completely idle.  Chromium can otherwise make the
+ * launcher execute roughly one thousand wait/input/dirty checks per second
+ * even when its page has not changed. */
+#define XSESSION_ACTIVE_BACKOFF_MAX_MS 8u
 
 /* Userland half of the [ktr] keystroke stage trace; the kernel half is
  * Kernel/Source/Debug/KeyTrace.h. Same tag, same clock (get_uptime_ms()
@@ -332,10 +339,12 @@ static int32_t xsession_scale_axis(uint16_t pos, uint32_t extent)
  * xf86-input-evdev; the compositor delivers this window's input to us as IPC
  * events, in window-content coordinates. Before this, nothing ever fed those
  * devices, so a client like Chromium could be seen but not used. */
-static void xsession_forward_input(xsession_t *session)
+static bool xsession_forward_input(xsession_t *session)
 {
+    bool forwarded = false;
     input_keyboard_event_t key;
     while (window_input_keyboard_poll(&key) > 0) {
+        forwarded = true;
         uint16_t code = xsession_linux_keycode(key.keycode);
         if (code == 0u) {
             continue;
@@ -351,6 +360,7 @@ static void xsession_forward_input(xsession_t *session)
 
     input_mouse_event_t mouse;
     while (window_input_mouse_poll(&mouse) > 0) {
+        forwarded = true;
         (void)input_evdev_inject(1u, LX_EV_ABS, LX_ABS_X,
                                  xsession_scale_axis(mouse.x, session->width));
         (void)input_evdev_inject(1u, LX_EV_ABS, LX_ABS_Y,
@@ -373,6 +383,7 @@ static void xsession_forward_input(xsession_t *session)
         }
         (void)input_evdev_inject(1u, LX_EV_SYN, LX_SYN_REPORT, 0);
     }
+    return forwarded;
 }
 
 /* Startup timing probe (-DXSESSION_TIMING=1). Logs, on the same uptime clock
@@ -507,6 +518,14 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
         return -1;
     }
 
+    /* Foreign desktop clients spend their startup budget competing with the
+     * compositor, Xorg and the input pump.  Priority 3 is the same priority
+     * used by the login/desktop launch path and only changes the scheduler's
+     * time slice; it does not make the client real-time or prevent sleeping.
+     * Applying it here also covers Chromium's renderer/zygote children,
+     * which inherit the owner's priority when they are created. */
+    (void)process_set_priority(pid, 3u);
+
     /* The native process_waitpid() never blocks: it reports 0 while the child
      * still runs and only returns the pid once it has exited. Polling it is
      * what keeps the mirror being repainted in the meantime. */
@@ -520,17 +539,20 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
      * drives the panel there is no surface tied to the window's size. */
     const bool mirror_owned = session->mirrored != 0;
     bool rebind_mirror = false;
+    uint32_t poll_interval_ms = XSESSION_FRAME_MS;
     for (;;) {
         int32_t reaped = process_waitpid(pid, &status, 0);
         if (reaped == pid) break;   /* exited, status valid */
         if (reaped < 0) break;      /* no such child */
+        bool did_work = false;
         if (session->window != 0u) {
-            xsession_forward_input(session);
+            did_work = xsession_forward_input(session);
             uint32_t new_w = 0u, new_h = 0u;
             if (window_poll_resize(session->window, &new_w, &new_h) > 0 &&
                 mirror_owned &&
                 (new_w != session->surface_w || new_h != session->surface_h)) {
                 rebind_mirror = true;
+                did_work = true;
             }
             /* Stays set until a rebind succeeds: dropping the window here
              * would strand X drawing into a surface nothing composites. */
@@ -539,6 +561,7 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
             }
         }
         if (session->mirrored && display_kms_mirror_take_dirty()) {
+            did_work = true;
             window_damage(session->window, 0u, 0u,
                           session->surface_w, session->surface_h);
             /* [ktr] MD: the X server has produced the frame that answers the
@@ -550,7 +573,23 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
             xsession_timing_note(session, spawned_ms);
 #endif
         }
-        sleep_ms(session->mirrored ? XSESSION_FRAME_MS : XSESSION_IDLE_MS);
+        if (!session->mirrored) {
+            sleep_ms(XSESSION_IDLE_MS);
+        } else {
+            /* A changed frame or input keeps the next check at the latency
+             * floor.  With no work, exponential backoff cuts idle polling;
+             * even a new event arriving during backoff is observed within
+             * the bounded 8 ms interval. */
+            if (did_work) {
+                poll_interval_ms = XSESSION_FRAME_MS;
+            } else if (poll_interval_ms < XSESSION_ACTIVE_BACKOFF_MAX_MS) {
+                poll_interval_ms *= 2u;
+                if (poll_interval_ms > XSESSION_ACTIVE_BACKOFF_MAX_MS) {
+                    poll_interval_ms = XSESSION_ACTIVE_BACKOFF_MAX_MS;
+                }
+            }
+            sleep_ms(poll_interval_ms);
+        }
     }
     return status;
 }
