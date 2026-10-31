@@ -20,6 +20,8 @@
 #include <stdint.h>
 
 #define WIFI_SSID_MAX 32u
+/* Mirrors DRIVER_WIFI_DETAIL_MAX in the kernel's DriverBinary.h. */
+#define WIFI_DETAIL_MAX 63u
 
 typedef enum {
     WIFI_SECURITY_UNKNOWN = 0,
@@ -50,6 +52,7 @@ typedef struct __attribute__((packed)) {
     uint32_t state; /* wifi_state_t */
     char ssid[WIFI_SSID_MAX + 1u];
     uint8_t mac[6];
+    char detail[WIFI_DETAIL_MAX + 1u]; /* see driver_wifi_status_t */
 } wifi_status_t;
 
 #define WIFI_MAX_SCAN_RESULTS 24u
