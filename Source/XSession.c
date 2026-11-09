@@ -495,7 +495,7 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
     }
 
     /* Every client of this server needs the same shared environment -- the
-     * display, Mesa's software rasteriser, and the desktop stack a
+     * display, Mesa's renderer selection, and the desktop stack a
      * GTK/GLib/fontconfig program assumes -- and `extra_envp` adds whatever
      * this one program needs on top of it (Doom's IWAD directory, say).
      * Assembled here rather than in the kernel: which display a client uses

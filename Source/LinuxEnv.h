@@ -21,7 +21,7 @@
  *
  *     linux_env_t env;
  *     linux_env_init(&env);
- *     linux_env_add_x11(&env);          // DISPLAY, Mesa software rasteriser
+ *     linux_env_add_x11(&env);          // DISPLAY, Mesa renderer selection
  *     linux_env_add_doom(&env);         // plus the IWAD/soundfont/audio backend
  *     process_spawn_with_env(path, args, linux_env_entries(&env));
  *
@@ -53,12 +53,13 @@ int32_t linux_env_add(linux_env_t *env, const char *entry);
  * terminated. */
 const char *const *linux_env_entries(const linux_env_t *env);
 
-/* An X11 client on the display XSession brings up, drawing through Mesa's
- * software rasteriser. DISPLAY is not optional -- Xlib does not fall back to
- * :0 -- and LIBGL/GALLIUM/LP_NUM_THREADS are what keeps Mesa on llvmpipe with
- * one raster thread until there is a real GPU and the thread-handoff bug
- * behind M24 is found. XFILESEARCHPATH is where Xt (xterm) looks for the
- * app-defaults files. */
+/* An X11 client on the display XSession brings up. DISPLAY is not optional --
+ * Xlib does not fall back to :0 -- and XFILESEARCHPATH is where Xt (xterm)
+ * looks for the app-defaults files. When the kernel reports a usable 3D
+ * render node, LIBGL/GALLIUM/MESA_LOADER_DRIVER_OVERRIDE are deliberately left
+ * unset so Mesa selects the VirtIO virgl driver; without one, the group also
+ * pins Mesa to llvmpipe (one raster thread until the thread-handoff bug behind
+ * M24 is found). */
 void linux_env_add_x11(linux_env_t *env);
 
 /* The desktop stack a GTK/GLib/gdk-pixbuf program assumes: which backends to
@@ -69,8 +70,10 @@ void linux_env_add_x11(linux_env_t *env);
 void linux_env_add_desktop(linux_env_t *env);
 
 /* The X *server* only: preload libgbm before modesetting_drv.so is dlopen()ed
- * (it needs gbm_* but does not list it in DT_NEEDED), and bind eagerly so a
- * broken lazy PLT fixup in libglx cannot fault mid-message. */
+ * (it needs gbm_* but does not list it in DT_NEEDED), bind eagerly so a
+ * broken lazy PLT fixup in libglx cannot fault mid-message, and keep the
+ * server itself on llvmpipe/kms_swrast because card0 is the scanout shim.
+ * X clients built with linux_env_add_x11() may still use the render node. */
 void linux_env_add_xorg_server(linux_env_t *env);
 
 /* Doom: where its IWAD and soundfont are, and the null/dummy audio backends

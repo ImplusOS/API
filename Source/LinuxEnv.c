@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "LinuxEnv.h"
+#include "SystemInfo.h"
 
 /*
  * See LinuxEnv.h. Every explanation that used to sit next to an entry in the
@@ -67,9 +68,24 @@ static void linux_env_add_list(linux_env_t *env, const char *const *list)
     }
 }
 
+/* A ready VirtIO render node means Mesa can run the virgl Gallium driver
+ * instead of llvmpipe. The kernel reports this through the graphics-info
+ * syscall because scanout and rendering are independent roles: a plain
+ * framebuffer can still own the panel while VirtIO serves /dev/dri/renderD128.
+ */
+static int linux_env_has_3d_renderer(void)
+{
+    system_graphics_info_t info;
+    memset(&info, 0, sizeof(info));
+    if (os_get_graphics_info(&info) < 0) {
+        return 0;
+    }
+    return (info.acceleration_flags & SYSTEM_GRAPHICS_ACCEL_3D) != 0u;
+}
+
 void linux_env_add_x11(linux_env_t *env)
 {
-    static const char *const group[] = {
+    static const char *const common[] = {
         /* Keep the runtime path explicit in every foreign GUI launch.  The
          * kernel also supplies this for the glibc PT_INTERP case, but the
          * loader must receive it in the initial envp: Xorg/GTK invoke the
@@ -82,23 +98,21 @@ void linux_env_add_x11(linux_env_t *env)
          * error state, so every X client dies at startup with "Couldn't
          * connect to display!". */
         "DISPLAY=:0",
-        /* Mesa must rasterise in software: the Xorg we spawn runs modesetting
-         * on /dev/dri/card0 (the kernel's KMS shim) with no GPU behind it, so
-         * llvmpipe is the only driver that can draw at all. */
+        /* The X core keyboard needs xkb-data's rules root; xkbcomp is run
+         * against it by the server at activation time. */
+        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
+        /* Where Xt (xterm) looks for app-defaults resource files.
+         * stage-xterm.sh installs them. */
+        "XFILESEARCHPATH=/etc/X11/app-defaults/%N:/usr/share/X11/app-defaults/%N",
+        NULL,
+    };
+    /* Only used when no 3D render backend exists. llvmpipe is the only
+     * driver that can draw without a render node, and kms_swrast is the DRI
+     * driver that combines the kernel's dumb-buffer KMS shim with software
+     * rasterisation. */
+    static const char *const software[] = {
         "LIBGL_ALWAYS_SOFTWARE=1",
         "GALLIUM_DRIVER=llvmpipe",
-        /* ...and which DRI driver Mesa binds is decided before any of that:
-         * loader_get_driver_for_fd() returns MESA_LOADER_DRIVER_OVERRIDE
-         * unconditionally (it is checked first, ahead of LIBGL_ALWAYS_SOFTWARE
-         * and ahead of the PCI-id lookup), and "kms_swrast" is the one that
-         * combines dumb-buffer KMS with software rasterisation -- exactly what
-         * the kernel's DRM shim implements. This sits in the *X-client* group
-         * rather than the X-server one because the PCI-id fallback would
-         * otherwise pick "virtio_gpu" (the display adapter's real vendor/device
-         * id) for any Mesa process launched without the server's environment,
-         * and virtio_gpu_dri.so has no counterpart in the shim. Every client
-         * path -- xsession_run_env(), the gtk3 demo, Chromium -- goes through
-         * here. */
         "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
         /* llvmpipe's scene/command-handoff worker threads race the main
          * thread's JIT'd raster kernel under our SMP scheduler; the torn read
@@ -111,15 +125,18 @@ void linux_env_add_x11(linux_env_t *env)
          * as if softpipe had been tried and ruled out. linux_env_add() now
          * refuses a duplicate key outright. */
         "LP_NUM_THREADS=1",
-        /* The X core keyboard needs xkb-data's rules root; xkbcomp is run
-         * against it by the server at activation time. */
-        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
-        /* Where Xt (xterm) looks for app-defaults resource files.
-         * stage-xterm.sh installs them. */
-        "XFILESEARCHPATH=/etc/X11/app-defaults/%N:/usr/share/X11/app-defaults/%N",
         NULL,
     };
-    linux_env_add_list(env, group);
+
+    linux_env_add_list(env, common);
+    if (!linux_env_has_3d_renderer()) {
+        linux_env_add_list(env, software);
+    }
+    /* With a ready render node, deliberately leave LIBGL_ALWAYS_SOFTWARE,
+     * GALLIUM_DRIVER and MESA_LOADER_DRIVER_OVERRIDE unset. Mesa's normal
+     * discovery then follows /dev/dri/renderD128's virtio_gpu identity and
+     * loads virtio_gpu_dri.so; forcing any of those variables here would keep
+     * every X client on llvmpipe even though the GPU is usable. */
 }
 
 void linux_env_add_desktop(linux_env_t *env)
@@ -181,18 +198,23 @@ void linux_env_add_xorg_server(linux_env_t *env)
          * with "undefined symbol: gbm_bo_get_plane_count". linux_env_add()
          * refuses a duplicate key for the same reason. */
         "LD_PRELOAD=libgbm.so.1",
+        /* The X *server* stays on software rendering even when a VirtIO
+         * render node is available: its modesetting DDX owns /dev/dri/card0,
+         * which is the kernel's scanout shim, not a virgl-capable KMS device.
+         * X clients get a different environment from linux_env_add_x11() and
+         * may use the render node through DRI3. */
+        "LIBGL_ALWAYS_SOFTWARE=1",
+        "GALLIUM_DRIVER=llvmpipe",
+        "LP_NUM_THREADS=1",
         /* Mesa's loader checks MESA_LOADER_DRIVER_OVERRIDE before
          * LIBGL_ALWAYS_SOFTWARE.  Without this override LIBGL_ALWAYS_SOFTWARE=1
-         * (set by linux_env_add_x11) makes loader_get_driver() return "swrast",
-         * which is the pure software renderer with no KMS support — so
-         * gbm_create_device() fails to create a screen and glamor reports
-         * "couldn't get display device".  "kms_swrast" is the DRI driver that
-         * combines dumb-buffer KMS with software rasterisation, which is
-         * exactly what our DRM shim provides.  GALLIUM_DRIVER=llvmpipe (from
-         * the x11 group) still selects llvmpipe for the actual rasteriser.
-         * NOTE: linux_env_add_x11() now sets this too (for X clients, which
-         * never get this group); the duplicate add here is refused and the
-         * first -- identical -- value stands. */
+         * makes loader_get_driver() return "swrast", which is the pure
+         * software renderer with no KMS support — so gbm_create_device()
+         * fails to create a screen and glamor reports "couldn't get display
+         * device".  "kms_swrast" is the DRI driver that combines dumb-buffer
+         * KMS with software rasterisation, which is exactly what our DRM
+         * shim provides.  GALLIUM_DRIVER=llvmpipe still selects llvmpipe for
+         * the actual rasteriser. */
         "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
         /* Explicit GBM backend search path: Mesa's compile-time default may
          * differ from ImplusOS's layout, and gbm_create_device() dlopen()s
