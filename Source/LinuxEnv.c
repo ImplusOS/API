@@ -182,6 +182,24 @@ void linux_env_add_desktop(linux_env_t *env)
 
 void linux_env_add_xorg_server(linux_env_t *env)
 {
+    /* No 3D backend: the X server's modesetting DDX renders with glamor on
+     * llvmpipe over card0's dumb-buffer KMS shim. */
+    static const char *const software[] = {
+        "LIBGL_ALWAYS_SOFTWARE=1",
+        "GALLIUM_DRIVER=llvmpipe",
+        "LP_NUM_THREADS=1",
+        /* Mesa's loader checks MESA_LOADER_DRIVER_OVERRIDE before
+         * LIBGL_ALWAYS_SOFTWARE.  Without this override LIBGL_ALWAYS_SOFTWARE=1
+         * makes loader_get_driver() return "swrast", which is the pure
+         * software renderer with no KMS support — so gbm_create_device()
+         * fails to create a screen and glamor reports "couldn't get display
+         * device".  "kms_swrast" is the DRI driver that combines dumb-buffer
+         * KMS with software rasterisation, which is exactly what our DRM
+         * shim provides.  GALLIUM_DRIVER=llvmpipe still selects llvmpipe for
+         * the actual rasteriser. */
+        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
+        NULL,
+    };
     static const char *const group[] = {
         /* Xorg's modesetting_drv.so has 12 undefined gbm_* symbols and does
          * NOT list libgbm.so.1 in DT_NEEDED -- on a stock distro it only
@@ -198,24 +216,6 @@ void linux_env_add_xorg_server(linux_env_t *env)
          * with "undefined symbol: gbm_bo_get_plane_count". linux_env_add()
          * refuses a duplicate key for the same reason. */
         "LD_PRELOAD=libgbm.so.1",
-        /* The X *server* stays on software rendering even when a VirtIO
-         * render node is available: its modesetting DDX owns /dev/dri/card0,
-         * which is the kernel's scanout shim, not a virgl-capable KMS device.
-         * X clients get a different environment from linux_env_add_x11() and
-         * may use the render node through DRI3. */
-        "LIBGL_ALWAYS_SOFTWARE=1",
-        "GALLIUM_DRIVER=llvmpipe",
-        "LP_NUM_THREADS=1",
-        /* Mesa's loader checks MESA_LOADER_DRIVER_OVERRIDE before
-         * LIBGL_ALWAYS_SOFTWARE.  Without this override LIBGL_ALWAYS_SOFTWARE=1
-         * makes loader_get_driver() return "swrast", which is the pure
-         * software renderer with no KMS support — so gbm_create_device()
-         * fails to create a screen and glamor reports "couldn't get display
-         * device".  "kms_swrast" is the DRI driver that combines dumb-buffer
-         * KMS with software rasterisation, which is exactly what our DRM
-         * shim provides.  GALLIUM_DRIVER=llvmpipe still selects llvmpipe for
-         * the actual rasteriser. */
-        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
         /* Explicit GBM backend search path: Mesa's compile-time default may
          * differ from ImplusOS's layout, and gbm_create_device() dlopen()s
          * <path>/dri_gbm.so (or gbm_dri.so) from here. */
@@ -236,6 +236,16 @@ void linux_env_add_xorg_server(linux_env_t *env)
         NULL,
     };
     linux_env_add_list(env, group);
+    /* Only without a 3D render backend. With one, card0 itself speaks
+     * virtio_gpu (the kernel forwards its GEM/VIRTGPU ioctls to the virgl
+     * backend), so glamor runs on the host GPU through Mesa's virtio_gpu
+     * driver, and DRI3Open hands every GL client that same device -- which
+     * is the only way Chromium's GPU process ever reaches virgl: Mesa's X11
+     * platform gets its device fd from DRI3 and nowhere else. Forcing
+     * kms_swrast/llvmpipe here kept the whole X stack on the CPU. */
+    if (!linux_env_has_3d_renderer()) {
+        linux_env_add_list(env, software);
+    }
 }
 
 void linux_env_add_doom(linux_env_t *env)
