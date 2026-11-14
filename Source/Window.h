@@ -52,6 +52,24 @@ void window_release_backing_store(window_id_t wid);
  * window frozen on its last frame. Like the input polls, this drains the IPC
  * port, so keep calling it from the same loop that polls input. */
 int32_t window_poll_resize(window_id_t wid, uint32_t *out_w, uint32_t *out_h);
+
+/* For clients with several windows (XSession: one per X top-level). */
+/* Screen rectangle of the content area, below the title bar. */
+int32_t window_get_content_rect(window_id_t wid, uint32_t *x, uint32_t *y,
+                                uint32_t *w, uint32_t *h);
+/* Show `title` (UTF-8) in the title bar and the taskbar. */
+int32_t window_set_title(window_id_t wid, const char *title);
+/* true: the close button sends this process a close request (read it with
+ * window_poll_close()) instead of destroying the window, and the compositor
+ * never kills this process when such a window goes away. */
+int32_t window_set_close_policy(window_id_t wid, bool owner_handles);
+/* 1 and *out_wid when a close was requested for one of those windows. */
+int32_t window_poll_close(window_id_t *out_wid);
+/* window_input_*_poll(), also naming the window the event was sent for. */
+int32_t window_input_keyboard_poll_from(input_keyboard_event_t *out,
+                                        window_id_t *out_wid);
+int32_t window_input_mouse_poll_from(input_mouse_event_t *out,
+                                     window_id_t *out_wid);
 void window_damage(window_id_t wid, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void window_begin_transaction(window_id_t wid);
 void window_end_transaction(window_id_t wid);

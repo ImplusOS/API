@@ -24,8 +24,14 @@ typedef struct __attribute__((packed)) {
     uint16_t y;
     uint8_t buttons;
     int8_t wheel;
-    uint8_t reserved[2];
+    uint8_t flags;          /* INPUT_MOUSE_FLAG_* */
+    uint8_t reserved;
 } input_mouse_event_t;
+
+/* x/y are an absolute position, 0..INPUT_MOUSE_ABS_MAX across the screen,
+ * instead of signed relative deltas (USB tablets, QEMU usb-tablet). */
+#define INPUT_MOUSE_FLAG_ABSOLUTE 0x01u
+#define INPUT_MOUSE_ABS_MAX       32767u
 
 int32_t input_read_keyboard(input_keyboard_event_t *event_out);
 

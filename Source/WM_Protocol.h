@@ -56,6 +56,19 @@
 #define WM_SET_CURSOR          110
 #define WM_SET_WINDOW_ICON_PATH 111
 #define WM_SET_WINDOW_SURFACE_OPAQUE 112
+/* Replace the title shown in the title bar and the taskbar.
+ * Payload: wm_set_title_t (UTF-8, NUL-terminated within the buffer). */
+#define WM_SET_WINDOW_TITLE    113
+/* The owner handles this window's close button itself: the compositor sends
+ * it WM_CLOSE_REQUESTED instead of destroying the window, and never kills the
+ * owner when its last such window goes away. Payload: bool. For clients that
+ * host other programs' windows (Userland/API/Source/XSession.c). */
+#define WM_SET_WINDOW_CLOSE_POLICY 114
+/* Compositor -> owner: the user asked to close header.window_id. */
+#define WM_CLOSE_REQUESTED     115
+/* Screen rectangle of the window's content area (below the title bar).
+ * Reply has the same layout as WM_GET_WINDOW_RECT's. */
+#define WM_GET_CONTENT_RECT    116
 
 
 #define WM_STATUS_OK             0
@@ -91,6 +104,12 @@ typedef struct {
     uint32_t width;
     uint32_t height;
 } wm_window_resized_t;
+
+#define WM_SET_TITLE_MAX 128u
+typedef struct {
+    wm_msg_header_t header;
+    char title[WM_SET_TITLE_MAX];
+} wm_set_title_t;
 
 typedef struct {
     wm_msg_header_t header;

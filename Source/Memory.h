@@ -6,6 +6,9 @@
 void *malloc(size_t size);
 void  free(void *ptr);
 void *os_mmap(uint64_t length, uint64_t flags);
+/* Remove [address, address+length) from this address space (munmap(2)).
+ * Device pages (file_dev_mmap) are only unmapped, never freed. */
+int64_t os_munmap(void *address, uint64_t length);
 int32_t os_shared_memory_create(uint32_t size);
 int32_t os_shared_memory_grant(int32_t handle, int32_t pid);
 void *os_shared_memory_map(int32_t handle);

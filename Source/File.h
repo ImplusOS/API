@@ -37,3 +37,12 @@ int32_t file_stat(const char *path, file_stat_t *stat_out);
 int32_t file_pipe(int32_t fds[2]);
 int32_t file_dup(int32_t oldfd);
 int32_t file_dup2(int32_t oldfd, int32_t newfd);
+
+/* Device control for character devices (DRM render node, evdev, ...): the
+ * Linux ioctl(2) request encoding, routed to the device's own handler.
+ * Returns 0 or a negative status. */
+int64_t file_ioctl(int32_t fd, uint64_t request, void *arg);
+/* Map `length` bytes of a character device at `offset` -- for a DRM render
+ * node, the offset DRM_IOCTL_VIRTGPU_MAP handed out for a GEM buffer.
+ * Returns the mapping, or NULL. The mapping lives until the process exits. */
+void *file_dev_mmap(int32_t fd, uint64_t offset, uint64_t length);

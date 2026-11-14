@@ -76,6 +76,12 @@ int32_t get_process_perf_info(int32_t pid, process_perf_info_t *info_out);
 int32_t get_boot_profile_count(void);
 int32_t get_boot_profile_entry(int32_t index, boot_profile_entry_t *entry_out);
 int32_t process_kill(int32_t pid);
+/* Send `signum` (Linux numbering: 15 = SIGTERM) to `pid`. process_kill() is
+ * this with SIGKILL. A negative `pid` names a session (or process group):
+ * -N reaches every process whose session or group is N, i.e. everything a
+ * spawned program N started without leaving its session. signum 0 only
+ * asks whether any such process is left (0: yes). */
+int32_t process_send_signal(int32_t pid, int32_t signum);
 int32_t process_set_priority(int32_t pid, uint32_t priority);
 uint64_t get_total_memory(void);
 uint64_t get_used_memory(void);
