@@ -28,6 +28,7 @@ void system_reboot(void);
 void sleep_ms(uint64_t milliseconds);
 uint64_t get_uptime_ms(void);
 
+/* reserved[0] carries the scheduling priority (PROCESS_PRIORITY_*). */
 typedef struct {
     int32_t pid;
     int32_t parent_pid;
@@ -82,6 +83,12 @@ int32_t process_kill(int32_t pid);
  * spawned program N started without leaving its session. signum 0 only
  * asks whether any such process is left (0: yes). */
 int32_t process_send_signal(int32_t pid, int32_t signum);
+/* Priority is a timeslice multiplier: 0 = 1x, 1 = 1.5x (the default every
+ * process starts with), 2 = 2x, 3 = 3x. */
+#define PROCESS_PRIORITY_LOW     0u
+#define PROCESS_PRIORITY_NORMAL  1u
+#define PROCESS_PRIORITY_HIGH    2u
+#define PROCESS_PRIORITY_HIGHEST 3u
 int32_t process_set_priority(int32_t pid, uint32_t priority);
 uint64_t get_total_memory(void);
 uint64_t get_used_memory(void);

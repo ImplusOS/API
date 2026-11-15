@@ -1,9 +1,9 @@
 # ImplusOS API
 
 Typed syscall wrappers for ImplusOS userland (`File.h`, `Graphics.h`,
-`Input.h`, `Socket.h`, `Audio.h`, `WiFi.h`, `OSDebug.h`, ...) plus a
-few helper libraries (`FreeType.c`, `Jpeg.c`, `XMLParser.c`,
-`Zlib.h`) shared by every app and service.
+`Input.h`, `Socket.h`, `Audio.h`, `WiFi.h`, `OSDebug.h`, ...) plus the
+libraries shared by every app and service: `UI.c` (widget toolkit),
+`Theme.c` (desktop theme) and `FreeType.c`.
 
 This repository is a component of **[ImplusOS](https://github.com/ImplusOS)**,
 a hobby operating system with a monolithic kernel, loadable driver modules,

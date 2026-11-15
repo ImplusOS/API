@@ -270,11 +270,10 @@ int32_t xsession_open(xsession_t *session, const char *title,
         session->display = display;
         char args[192];
         snprintf(args, sizeof args, XORG_ARGS_FMT, display);
+        /* The server's environment is its program profile (LinuxEnv.h). */
         linux_env_t xorg_env;
         linux_env_init(&xorg_env);
-        linux_env_add_x11(&xorg_env);
-        linux_env_add_desktop(&xorg_env);
-        linux_env_add_xorg_server(&xorg_env);
+        (void)linux_env_load_for_program(&xorg_env, XORG_PATH);
         session->xorg_pid = process_spawn_with_env(XORG_PATH, args,
                                                    linux_env_entries(&xorg_env));
         if (session->xorg_pid <= 0) {
@@ -977,16 +976,16 @@ int32_t xsession_run_env(xsession_t *session, const char *path, const char *args
         return -1;
     }
 
-    /* This server's display first: linux_env_add() keeps the first value it
-     * is given for a name, and linux_env_add_x11() carries the default. */
+    /* Most specific first, since linux_env_add() keeps the first value it
+     * is given for a name: this server's display, the caller's entries, the
+     * program's own profile, then the x11-client role profile (which carries
+     * the fallback DISPLAY). */
     linux_env_t env;
     linux_env_init(&env);
     (void)linux_env_add(&env, g_display_env);
-    linux_env_add_x11(&env);
-    linux_env_add_desktop(&env);
-    for (uint32_t i = 0; extra_envp != NULL && extra_envp[i] != NULL; ++i) {
-        (void)linux_env_add(&env, extra_envp[i]);
-    }
+    linux_env_add_entries(&env, extra_envp);
+    (void)linux_env_load_for_program(&env, path);
+    (void)linux_env_load_profile(&env, "x11-client");
 
     int32_t pid = process_spawn_with_env(path, (args != NULL) ? args : "",
                                          linux_env_entries(&env));

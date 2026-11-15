@@ -3,23 +3,31 @@
 #include <string.h>
 
 #include "LinuxEnv.h"
+#include "File.h"
 #include "SystemInfo.h"
 
 /*
- * See LinuxEnv.h. Every explanation that used to sit next to an entry in the
- * kernel's glibc_envp table moved here with the entry it belongs to; the
- * kernel keeps only the generic defaults (ProcessManager_Create.c).
+ * See LinuxEnv.h. This file is a reader for environment files and nothing
+ * else: the variables themselves, and the reasons each one exists, live in
+ * the .env files the build stages into LINUX_ENV_DIR.
  */
 
+/* Largest environment file read, and how deep @include may nest. */
+#define LINUX_ENV_FILE_MAX   16384u
+#define LINUX_ENV_INCLUDE_MAX 4u
+/* How deep [if] blocks may nest within one file. */
+#define LINUX_ENV_IF_MAX     8u
+#define LINUX_ENV_PATH_MAX   256u
+
 /* Length of the "NAME" part of a "NAME=VALUE" entry, or (uint32_t)-1 when
- * there is no '=' and so no key to speak of. */
+ * there is no '=' (or nothing before it) and so no key to speak of. */
 static uint32_t linux_env_key_length(const char *entry)
 {
     uint32_t i = 0;
     while (entry[i] != '\0' && entry[i] != '=') {
         ++i;
     }
-    return (entry[i] == '=') ? i : (uint32_t)-1;
+    return (entry[i] == '=' && i > 0u) ? i : (uint32_t)-1;
 }
 
 static int32_t linux_env_same_key(const char *a, const char *b)
@@ -39,11 +47,14 @@ void linux_env_init(linux_env_t *env)
     }
     env->count = 0u;
     env->entries[0] = NULL;
+    env->text_used = 0u;
+    env->accel3d = -1;
 }
 
 int32_t linux_env_add(linux_env_t *env, const char *entry)
 {
-    if (env == NULL || entry == NULL || env->count >= LINUX_ENV_MAX) {
+    if (env == NULL || entry == NULL || env->count >= LINUX_ENV_MAX ||
+        linux_env_key_length(entry) == (uint32_t)-1) {
         return 0;
     }
     for (uint32_t i = 0; i < env->count; ++i) {
@@ -56,263 +67,208 @@ int32_t linux_env_add(linux_env_t *env, const char *entry)
     return 1;
 }
 
+void linux_env_add_entries(linux_env_t *env, const char *const *entries)
+{
+    for (uint32_t i = 0; entries != NULL && entries[i] != NULL; ++i) {
+        (void)linux_env_add(env, entries[i]);
+    }
+}
+
 const char *const *linux_env_entries(const linux_env_t *env)
 {
     return (env != NULL) ? env->entries : NULL;
 }
 
-static void linux_env_add_list(linux_env_t *env, const char *const *list)
-{
-    for (uint32_t i = 0; list[i] != NULL; ++i) {
-        (void)linux_env_add(env, list[i]);
-    }
-}
+/* ------------------------------------------------------------------ */
+/* conditions                                                           */
+/* ------------------------------------------------------------------ */
 
 /* A ready VirtIO render node means Mesa can run the virgl Gallium driver
  * instead of llvmpipe. The kernel reports this through the graphics-info
  * syscall because scanout and rendering are independent roles: a plain
- * framebuffer can still own the panel while VirtIO serves /dev/dri/renderD128.
- */
-static int linux_env_has_3d_renderer(void)
+ * framebuffer can still own the panel while VirtIO serves
+ * /dev/dri/renderD128. Asked once per linux_env_t. */
+static int32_t linux_env_accel3d(linux_env_t *env)
 {
-    system_graphics_info_t info;
-    memset(&info, 0, sizeof(info));
-    if (os_get_graphics_info(&info) < 0) {
+    if (env->accel3d < 0) {
+        system_graphics_info_t info;
+        memset(&info, 0, sizeof(info));
+        env->accel3d =
+            (os_get_graphics_info(&info) >= 0 &&
+             (info.acceleration_flags & SYSTEM_GRAPHICS_ACCEL_3D) != 0u) ? 1 : 0;
+    }
+    return env->accel3d;
+}
+
+/* Value of the condition named by [name, name+len). An unknown condition is
+ * false, so a block guarded by it is skipped rather than half-applied. */
+static int32_t linux_env_condition(linux_env_t *env, const char *name, uint32_t len)
+{
+    if (len == 7u && memcmp(name, "accel3d", 7u) == 0) {
+        return linux_env_accel3d(env);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* parsing                                                              */
+/* ------------------------------------------------------------------ */
+
+static int32_t linux_env_load_file_depth(linux_env_t *env, const char *path,
+                                         uint32_t depth);
+
+static int32_t linux_env_load_profile_depth(linux_env_t *env, const char *name,
+                                            uint32_t name_len, uint32_t depth)
+{
+    static const char prefix[] = LINUX_ENV_DIR "/";
+    static const char suffix[] = ".env";
+    char path[LINUX_ENV_PATH_MAX];
+    uint32_t plen = (uint32_t)(sizeof prefix - 1u);
+    uint32_t slen = (uint32_t)(sizeof suffix - 1u);
+
+    if (name_len == 0u || plen + name_len + slen >= sizeof path) {
+        return -1;
+    }
+    /* A profile name is a file name, never a path. */
+    for (uint32_t i = 0; i < name_len; ++i) {
+        if (name[i] == '/') {
+            return -1;
+        }
+    }
+    memcpy(path, prefix, plen);
+    memcpy(path + plen, name, name_len);
+    memcpy(path + plen + name_len, suffix, slen + 1u);
+    return linux_env_load_file_depth(env, path, depth);
+}
+
+/* Copy one "NAME=VALUE" line into the text store and add it. */
+static int32_t linux_env_add_line(linux_env_t *env, const char *line, uint32_t len)
+{
+    if (env->text_used + len + 1u > LINUX_ENV_TEXT_MAX) {
         return 0;
     }
-    return (info.acceleration_flags & SYSTEM_GRAPHICS_ACCEL_3D) != 0u;
-}
-
-void linux_env_add_x11(linux_env_t *env)
-{
-    static const char *const common[] = {
-        /* Keep the runtime path explicit in every foreign GUI launch.  The
-         * kernel also supplies this for the glibc PT_INTERP case, but the
-         * loader must receive it in the initial envp: Xorg/GTK invoke the
-         * dynamic linker before their own code can repair a missing path. */
-        "LD_LIBRARY_PATH=/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib",
-        /* The server XSession brought up (or joined) listens on the Unix
-         * socket /tmp/.X11-unix/X0. Xlib does not fall back to ":0": with no
-         * DISPLAY in the environment, XOpenDisplay(NULL) hands a NULL display
-         * name to xcb_connect(), which returns a connection already in the
-         * error state, so every X client dies at startup with "Couldn't
-         * connect to display!". */
-        "DISPLAY=:0",
-        /* The X core keyboard needs xkb-data's rules root; xkbcomp is run
-         * against it by the server at activation time. */
-        "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
-        /* Where Xt (xterm) looks for app-defaults resource files.
-         * stage-xterm.sh installs them. */
-        "XFILESEARCHPATH=/etc/X11/app-defaults/%N:/usr/share/X11/app-defaults/%N",
-        NULL,
-    };
-    /* Only used when no 3D render backend exists. llvmpipe is the only
-     * driver that can draw without a render node, and kms_swrast is the DRI
-     * driver that combines the kernel's dumb-buffer KMS shim with software
-     * rasterisation. */
-    static const char *const software[] = {
-        "LIBGL_ALWAYS_SOFTWARE=1",
-        "GALLIUM_DRIVER=llvmpipe",
-        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
-        /* llvmpipe's scene/command-handoff worker threads race the main
-         * thread's JIT'd raster kernel under our SMP scheduler; the torn read
-         * showed up as a #GP on a user-mode deref of garbage rax at the first
-         * frame (TODO_Doom_Xorg_MethodA.md M24). Force one raster thread for
-         * now. TODO: find the real thread-handoff bug.
-         *
-         * NOTE: a second "GALLIUM_DRIVER=softpipe" used to sit below this and
-         * never took effect -- getenv() returns the first match -- so it read
-         * as if softpipe had been tried and ruled out. linux_env_add() now
-         * refuses a duplicate key outright. */
-        "LP_NUM_THREADS=1",
-        NULL,
-    };
-
-    linux_env_add_list(env, common);
-    if (!linux_env_has_3d_renderer()) {
-        linux_env_add_list(env, software);
+    char *copy = &env->text[env->text_used];
+    memcpy(copy, line, len);
+    copy[len] = '\0';
+    if (!linux_env_add(env, copy)) {
+        return 0;     /* duplicate or full: the copy's space is reused */
     }
-    /* With a ready render node, deliberately leave LIBGL_ALWAYS_SOFTWARE,
-     * GALLIUM_DRIVER and MESA_LOADER_DRIVER_OVERRIDE unset. Mesa's normal
-     * discovery then follows /dev/dri/renderD128's virtio_gpu identity and
-     * loads virtio_gpu_dri.so; forcing any of those variables here would keep
-     * every X client on llvmpipe even though the GPU is usable. */
+    env->text_used += len + 1u;
+    return 1;
 }
 
-void linux_env_add_desktop(linux_env_t *env)
+static int32_t linux_env_is_space(char c)
 {
-    static const char *const group[] = {
-        /* GTK3: try the Wayland backend, then X11. Whether either exists is
-         * the launcher's problem; naming the order is not the kernel's.
-         * Chromium's Ozone ignores GDK_BACKEND entirely. */
-        "GDK_BACKEND=wayland,x11",
-        /* GSettings has no writable dconf backend here, so look the schemas
-         * up in the image and answer every read from memory. Without a named
-         * schema directory gtk_init() has no schemas at all. */
-        "GSETTINGS_SCHEMA_DIR=/usr/share/glib-2.0/schemas",
-        "GSETTINGS_BACKEND=memory",
-        /* There is no D-Bus on ImplusOS, and saying so is not optional.
-         * Unset, GDBus treats a session bus as merely "not started yet" and
-         * autolaunches one: it reads /etc/machine-id and posix_spawn()s
-         * dbus-launch, which is not on the image. GTK3's startup reaches that
-         * path twice (GApplication registration, then the atk-bridge a11y
-         * module) and a GTK3 client got as far as binding every Wayland
-         * global and then stopped dead, never creating an window. An address
-         * that cannot be connected to makes the same call fail immediately
-         * instead, which both callers handle. NO_AT_BRIDGE keeps atk-bridge
-         * out of the process altogether.
-         * Docs/Others/TODO_GTK3_Wayland_LinuxABI.md G5 (W2'). */
-        "DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent",
-        "NO_AT_BRIDGE=1",
-        "FONTCONFIG_PATH=/etc/fonts",
-        "FONTCONFIG_FILE=/etc/fonts/fonts.conf",
-        /* gdk-pixbuf finds its loaders through a cache file whose path is
-         * compiled into the library. Name it (and the loader directory)
-         * explicitly so the image's layout is what is used rather than
-         * whatever the library was built against. Without a usable cache GTK3
-         * has no image loaders at all and aborts on the first icon it draws:
-         *   Gtk:ERROR:gtkiconhelper.c:495: Failed to load
-         *   .../image-missing.png: Unrecognized image file format */
-        "GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
-        "GDK_PIXBUF_MODULEDIR=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders",
-        NULL,
-    };
-    linux_env_add_list(env, group);
+    return (c == ' ' || c == '\t' || c == '\r') ? 1 : 0;
 }
 
-void linux_env_add_xorg_server(linux_env_t *env)
+static int32_t linux_env_parse(linux_env_t *env, const char *text, uint32_t size,
+                               uint32_t depth)
 {
-    /* No 3D backend: the X server's modesetting DDX renders with glamor on
-     * llvmpipe over card0's dumb-buffer KMS shim. */
-    static const char *const software[] = {
-        "LIBGL_ALWAYS_SOFTWARE=1",
-        "GALLIUM_DRIVER=llvmpipe",
-        "LP_NUM_THREADS=1",
-        /* Mesa's loader checks MESA_LOADER_DRIVER_OVERRIDE before
-         * LIBGL_ALWAYS_SOFTWARE.  Without this override LIBGL_ALWAYS_SOFTWARE=1
-         * makes loader_get_driver() return "swrast", which is the pure
-         * software renderer with no KMS support — so gbm_create_device()
-         * fails to create a screen and glamor reports "couldn't get display
-         * device".  "kms_swrast" is the DRI driver that combines dumb-buffer
-         * KMS with software rasterisation, which is exactly what our DRM
-         * shim provides.  GALLIUM_DRIVER=llvmpipe still selects llvmpipe for
-         * the actual rasteriser. */
-        "MESA_LOADER_DRIVER_OVERRIDE=kms_swrast",
-        NULL,
-    };
-    static const char *const group[] = {
-        /* Xorg's modesetting_drv.so has 12 undefined gbm_* symbols and does
-         * NOT list libgbm.so.1 in DT_NEEDED -- on a stock distro it only
-         * resolves them because AccelMethod "glamor" pulls in
-         * libglamoregl.so (-> libgbm). Our xorg.conf forces AccelMethod
-         * "none" (no GPU), so nothing loads libgbm and the driver fails
-         * relocation ("undefined symbol: gbm_bo_get_plane_count", "No
-         * drivers available"). Preload libgbm.so.1 so its symbols sit in the
-         * global scope before modesetting_drv.so is dlopen()ed.
-         * TODO_Doom_Xorg_MethodA.md M6 (7th boot).
-         *
-         * NOTE: glibc's ld.so keeps only the LAST LD_PRELOAD it sees, so a
-         * second line here would silently drop libgbm and Xorg would die
-         * with "undefined symbol: gbm_bo_get_plane_count". linux_env_add()
-         * refuses a duplicate key for the same reason. */
-        "LD_PRELOAD=libgbm.so.1",
-        /* Explicit GBM backend search path: Mesa's compile-time default may
-         * differ from ImplusOS's layout, and gbm_create_device() dlopen()s
-         * <path>/dri_gbm.so (or gbm_dri.so) from here. */
-        "GBM_BACKENDS_PATH=/usr/lib/x86_64-linux-gnu/gbm",
-        /* Bind every relocation at load time. Two reasons:
-         * (1) boot 7 proved libglx.so resolves cleanly under eager binding
-         *     but a *lazy* PLT fixup for one of its symbols dies at
-         *     GlxExtensionInit() time with an un-printable name (the process
-         *     faults mid-message) -- eager binding sidesteps the broken lazy
-         *     path;
-         * (2) with LD_WARN=1 a load-time relocation miss is reported by name
-         *     and made non-fatal. LD_WARN itself was dropped: it demoted the
-         *     unresolved R_X86_64_GLOB_DAT for `glxServer` to a warning and
-         *     left the GOT slot 0, so libglx.so later did `call *0x38(NULL)`
-         *     -> SIGSEGV at 0x38. Without it the miss is fatal AND named.
-         * TODO_Doom_Xorg_MethodA.md M6/M7. */
-        "LD_BIND_NOW=1",
-        NULL,
-    };
-    linux_env_add_list(env, group);
-    /* Only without a 3D render backend. With one, card0 itself speaks
-     * virtio_gpu (the kernel forwards its GEM/VIRTGPU ioctls to the virgl
-     * backend), so glamor runs on the host GPU through Mesa's virtio_gpu
-     * driver, and DRI3Open hands every GL client that same device -- which
-     * is the only way Chromium's GPU process ever reaches virgl: Mesa's X11
-     * platform gets its device fd from DRI3 and nowhere else. Forcing
-     * kms_swrast/llvmpipe here kept the whole X stack on the CPU. */
-    if (!linux_env_has_3d_renderer()) {
-        linux_env_add_list(env, software);
+    /* active[i]: whether the lines of the i-th open [if] block are kept;
+     * a block inside a skipped block is skipped whatever its condition. */
+    int32_t active[LINUX_ENV_IF_MAX + 1u];
+    uint32_t level = 0u;
+    int32_t added = 0;
+    active[0] = 1;
+
+    uint32_t pos = 0u;
+    while (pos < size) {
+        uint32_t start = pos;
+        while (pos < size && text[pos] != '\n') {
+            ++pos;
+        }
+        uint32_t end = pos;
+        ++pos;                                     /* past the '\n' */
+
+        while (start < end && linux_env_is_space(text[start])) ++start;
+        while (end > start && linux_env_is_space(text[end - 1u])) --end;
+        if (start == end || text[start] == '#') {
+            continue;
+        }
+        const char *line = &text[start];
+        uint32_t len = end - start;
+
+        if (line[0] == '[') {
+            if (len == 7u && memcmp(line, "[endif]", 7u) == 0) {
+                if (level > 0u) --level;
+            } else if (len > 5u && memcmp(line, "[if ", 4u) == 0 &&
+                       line[len - 1u] == ']' && level < LINUX_ENV_IF_MAX) {
+                const char *cond = line + 4u;
+                uint32_t clen = len - 5u;
+                int32_t negate = 0;
+                if (clen > 0u && cond[0] == '!') {
+                    negate = 1;
+                    ++cond;
+                    --clen;
+                }
+                int32_t holds = linux_env_condition(env, cond, clen);
+                if (negate) holds = !holds;
+                active[level + 1u] = active[level] && holds;
+                ++level;
+            }
+            continue;
+        }
+        if (!active[level]) {
+            continue;
+        }
+        if (len > 9u && memcmp(line, "@include ", 9u) == 0) {
+            const char *name = line + 9u;
+            uint32_t nlen = len - 9u;
+            while (nlen > 0u && linux_env_is_space(*name)) {
+                ++name;
+                --nlen;
+            }
+            int32_t n = linux_env_load_profile_depth(env, name, nlen, depth + 1u);
+            if (n > 0) added += n;
+            continue;
+        }
+        added += linux_env_add_line(env, line, len);
     }
+    return added;
 }
 
-void linux_env_add_doom(linux_env_t *env)
+static int32_t linux_env_load_file_depth(linux_env_t *env, const char *path,
+                                         uint32_t depth)
 {
-    static const char *const group[] = {
-        /* Doom pulls libopenal (+ SDL2 via libfluidsynth). ImplusOS has no
-         * PipeWire/PulseAudio/ALSA device; letting OpenAL-soft probe them
-         * makes libpulse's pa_make_fd_cloexec() abort the process. Force the
-         * null / dummy backends -- audio is silent, Doom runs. */
-        "ALSOFT_DRIVERS=null",
-        "SDL_AUDIODRIVER=dummy",
-        "PULSE_SERVER=none",
-        /* Doom locates its IWAD relative to DOOMWADDIR (else "."); its
-         * soundfont from SOUNDFONT. Both data files live beside the binary
-         * in /Userland/Doom/Resource -- which is also why spawn gives the
-         * child the executable's own directory as its cwd. */
-        "DOOMWADDIR=/Userland/Doom/Resource",
-        "SOUNDFONT=/Userland/Doom/Resource/soundfont.sf2",
-        NULL,
-    };
-    linux_env_add_list(env, group);
+    if (env == NULL || path == NULL || depth > LINUX_ENV_INCLUDE_MAX) {
+        return -1;
+    }
+    int32_t fd = file_open(path, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    char buffer[LINUX_ENV_FILE_MAX];
+    uint32_t size = 0u;
+    while (size < LINUX_ENV_FILE_MAX) {
+        int64_t n = file_read(fd, buffer + size, LINUX_ENV_FILE_MAX - size);
+        if (n <= 0) break;
+        size += (uint32_t)n;
+    }
+    (void)file_close(fd);
+    return linux_env_parse(env, buffer, size, depth);
 }
 
-void linux_env_add_wine(linux_env_t *env)
+int32_t linux_env_load_file(linux_env_t *env, const char *path)
 {
-    static const char *const group[] = {
-        /* The image has no persistent home volume. Wine's prefix is a
-         * writable tmpfs directory and is recreated on each boot, which is
-         * sufficient for winecfg and for a Windows program supplied in the
-         * launch argument. */
-        "WINEPREFIX=/tmp/wine",
-        "WINEARCH=win64",
-        /* The staged /usr/bin/wineserver entry is Debian's shell wrapper.
-         * ImplusOS process_spawn executes ELF files directly, so Wine must
-         * be pointed at the real 64-bit server executable instead of waiting
-         * forever for an unlaunchable wrapper. */
-        "WINESERVER=/usr/lib/wine/wineserver64",
-        "PATH=/usr/bin:/usr/lib/wine:/bin",
-        /* Debian keeps the Unix/PE Wine modules below the multiarch path.
-         * The Debian shell wrapper normally establishes this indirectly;
-         * ImplusOS enters wine64 directly from the ELF launcher. */
-        "WINEDLLPATH=/usr/lib/x86_64-linux-gnu/wine/x86_64-unix:/usr/lib/x86_64-linux-gnu/wine/x86_64-windows",
-        /* Avoid Wine's secondary loader exec: the native launcher already
-         * entered the final wine64 ELF and ImplusOS has no shebang/alternatives
-         * exec path for that hand-off. */
-        "WINELOADERNOEXEC=1",
-        /* There is no menu database or D-Bus session to update. Disabling
-         * this optional helper avoids a needless wineserver child during
-         * prefix creation. */
-        "WINEDLLOVERRIDES=winemenubuilder.exe=d",
-        NULL,
-    };
-    linux_env_add_list(env, group);
+    return linux_env_load_file_depth(env, path, 0u);
 }
 
-void linux_env_add_implus_ldso(linux_env_t *env)
+int32_t linux_env_load_profile(linux_env_t *env, const char *name)
 {
-    static const char *const group[] = {
-        /* Where the in-tree ld.so looks for the libraries of the test ELF it
-         * runs, and the preload shim that test goes through. The kernel used
-         * to set both for every process whose PT_INTERP named an "ld-..."
-         * interpreter -- which put a service's directory in the kernel -- so
-         * it is now the launcher of that test ELF which says so, by adding
-         * this group. glibc's loader must never see these values. */
-        "LD_LIBRARY_PATH=/Userland/Service/com.ImplusOS.dynmain/lib",
-        "LD_PRELOAD=libpreload.so",
-        NULL,
-    };
-    linux_env_add_list(env, group);
+    if (env == NULL || name == NULL) {
+        return -1;
+    }
+    return linux_env_load_profile_depth(env, name, (uint32_t)strlen(name), 0u);
+}
+
+int32_t linux_env_load_for_program(linux_env_t *env, const char *program_path)
+{
+    if (env == NULL || program_path == NULL) {
+        return 0;
+    }
+    const char *base = strrchr(program_path, '/');
+    base = (base != NULL) ? base + 1 : program_path;
+    int32_t n = linux_env_load_profile(env, base);
+    return (n > 0) ? n : 0;
 }
