@@ -488,6 +488,7 @@ void ui_set_text(ui_widget_t *w, const char *t)
         set_buf(w, t);
         w->caret = w->kind == UI_TEXTBOX ? w->len : 0u;
         w->top_line = 0;
+        w->painted_caret = UINT32_MAX;     /* view follows the caret again */
     } else {
         strncpy(w->text, t ? t : "", sizeof(w->text) - 1);
         w->text[sizeof(w->text) - 1] = '\0';
@@ -627,12 +628,22 @@ static void paint_textarea(ui_canvas_t *c, const theme_t *t, ui_widget_t *w, boo
     if (vis < 1) vis = 1;
     w->vis_lines = (uint32_t)vis;
 
-    /* caret line/column, and keep the caret line on screen */
-    uint32_t cl = 0, line_start = 0;
-    for (uint32_t i = 0; i < w->caret && i < w->len; ++i)
-        if (w->buf[i] == '\n') { cl++; line_start = i + 1; }
-    if (cl < w->top_line) w->top_line = cl;
-    if (cl >= w->top_line + (uint32_t)vis) w->top_line = cl - (uint32_t)vis + 1;
+    /* caret line/column and line count */
+    uint32_t cl = 0, line_start = 0, lines = 1;
+    for (uint32_t i = 0; i < w->len; ++i) {
+        if (w->buf[i] != '\n') continue;
+        if (i < w->caret) { cl++; line_start = i + 1; }
+        lines++;
+    }
+    /* The view follows the caret when the caret has moved; otherwise it
+     * stays where the wheel put it. */
+    if (w->caret != w->painted_caret) {
+        w->painted_caret = w->caret;
+        if (cl < w->top_line) w->top_line = cl;
+        if (cl >= w->top_line + (uint32_t)vis) w->top_line = cl - (uint32_t)vis + 1;
+    }
+    if (w->top_line + (uint32_t)vis > lines)
+        w->top_line = lines > (uint32_t)vis ? lines - (uint32_t)vis : 0u;
 
     char buf[512];
     const char *p = w->buf;
@@ -690,16 +701,19 @@ static void paint(ui_canvas_t *c, ui_widget_t *w)
             icon(c, x + (cw - 20) / 2, y + (ch - 20) / 2, 20, w->icon, fg);
             break;
         }
-        int tx = x + 14;
-        if (w->icon) { icon(c, x + 12, y + (ch - 18) / 2, 18, w->icon, fg); tx = x + 36; }
-        text_mid(c, tx, y, ch, w->text, THEME_FONT_BODY, fg, cw - (tx - x) - 8);
+        /* icon + label, centred as a group */
+        int content = text_w_n(w->text, -1, THEME_FONT_BODY) + (w->icon ? 24 : 0);
+        int tx = x + (cw - content) / 2;
+        if (tx < x + 12) tx = x + 12;
+        if (w->icon) { icon(c, tx, y + (ch - 18) / 2, 18, w->icon, fg); tx += 24; }
+        text_mid(c, tx, y, ch, w->text, THEME_FONT_BODY, fg, x + cw - 8 - tx);
         break;
     }
 
     case UI_TEXTBOX: {
         boxed(c, x, y, cw, ch, THEME_RADIUS, t->surface,
               focus ? t->accent : t->border, focus ? 2 : 1);
-        float px = THEME_FONT_BODY;
+        float px = label_px(w);
         int ty = y + (ch - (int)px - 3) / 2;
         text(c, x + 10, ty, w->buf, px, t->text, cw - 20);
         if (focus)
@@ -889,9 +903,8 @@ static void scroll_by(ui_widget_t *w, int delta)
         w->scroll = next < 0 ? 0u : (uint32_t)next;
         list_clamp(w);
     } else {
-        /* A read-only textarea scrolls by moving its caret: the painter
-         * follows the caret, so this is the one way to move the view. */
-        caret_lines(w, delta);
+        int next = (int)w->top_line + delta;   /* clamped by the painter */
+        w->top_line = next < 0 ? 0u : (uint32_t)next;
     }
 }
 

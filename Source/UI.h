@@ -91,7 +91,8 @@ struct ui_widget {
     /* content */
     char      text[192];        /* label / button text                     */
     ui_icon_t icon;
-    float     font;             /* label size in px; 0 = THEME_FONT_BODY   */
+    float     font;             /* label / textbox text size in px;
+                                   0 = THEME_FONT_BODY                     */
     bool      dim;              /* label in text_dim                       */
     bool      primary;          /* button drawn in the accent colour       */
 
@@ -122,7 +123,7 @@ struct ui_widget {
     /* toolkit-private */
     int32_t  x, y, w, h;
     bool     hover, pressed;
-    uint32_t top_line, vis_lines;
+    uint32_t top_line, vis_lines, painted_caret;
     uint64_t click_ms;
     int32_t  click_row;
 };
