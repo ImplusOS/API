@@ -375,7 +375,6 @@ static ui_widget_t *add(ui_widget_t *parent, ui_kind_t kind)
 {
     ui_widget_t *w = calloc(1, sizeof(*w));
     if (!w) {
-        serial_write_string("[ui] out of memory\n");
         process_exit(1);
     }
     w->kind = kind;

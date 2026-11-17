@@ -22,9 +22,8 @@
  *   - a role profile is named after what the caller is doing ("x11-client",
  *     "desktop"); linux_env_load_profile() loads it by that name.
  *
- * The build collects every Environment/<name>.env under Userland/API,
- * Userland/Application/<app> and Userland/Service/<service> into that one
- * directory (STAGE_LINUX_ENV in the top-level Makefile): an application ships
+ * The build collects every Environment/<name>.env under Userland/API and
+ * Userland/Application/<app> into that one directory (STAGE_LINUX_ENV in the top-level Makefile): an application ships
  * the profile for the program it launches beside its own sources, and adding
  * one is dropping a file there.
  *

@@ -206,7 +206,6 @@ static int32_t wait_reply(x11_conn_t *c, uint16_t seq, uint8_t *out,
             consume_front(c, len);
         }
         if (get_uptime_ms() > deadline) {
-            serial_write_string("[x11] reply timed out\n");
             c->broken = true;
             break;
         }
@@ -258,7 +257,6 @@ int32_t x11_connect(x11_conn_t *c, uint32_t display, uint32_t timeout_ms)
         sleep_ms(2u);
     }
     if (c->rbuf[0] != 1u) {
-        serial_write_string("[x11] connection refused by the server\n");
         x11_disconnect(c);
         return -1;
     }
@@ -287,8 +285,6 @@ int32_t x11_connect(x11_conn_t *c, uint32_t display, uint32_t timeout_ms)
         uint8_t rep[32];
         if (wait_reply(c, seq, rep, sizeof rep) >= 32 && rep[8] != 0u) {
             c->xtest_opcode = rep[9];
-        } else {
-            serial_write_string("[x11] the server has no XTEST; no input\n");
         }
     }
     return c->broken ? -1 : 0;

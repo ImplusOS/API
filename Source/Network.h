@@ -13,9 +13,6 @@ int32_t udp_bind_port(uint16_t port);
 int32_t udp_unbind_port(uint16_t port);
 int32_t udp_recv(uint16_t port, void *buf, uint32_t buf_len);
 
-uint32_t dns_resolve(const char *hostname);
-uint32_t dns_resolve_with_server(const char *hostname, uint32_t dns_server_ip);
-
 #define TCP_STATE_LISTEN        1
 #define TCP_STATE_SYN_SENT      2
 #define TCP_STATE_SYN_RECEIVED  3

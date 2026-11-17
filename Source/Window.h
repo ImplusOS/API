@@ -60,9 +60,3 @@ int32_t window_poll_close(window_id_t *out_wid);
 
 /* Desktop services. */
 void window_show_notification(const char *title, const char *message);
-void window_show_error(const char *title, const char *message);
-/* Retheme the shell with `accent` in light or dark (see Theme.h).
- * Applications pick it up the next time they start. */
-void window_set_theme(uint32_t accent, bool dark);
-/* Re-read the wallpaper from disk and repaint the desktop. */
-void window_reload_background(void);

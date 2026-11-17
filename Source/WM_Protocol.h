@@ -20,10 +20,6 @@
 #define WM_SUBSCRIBE_INPUT     30
 #define WM_GET_WINDOW_RECT     40
 #define WM_SHOW_NOTIFICATION   80
-#define WM_SHOW_DIALOG         81
-/* Payload: uint32_t accent, uint32_t dark. */
-#define WM_SET_THEME           90
-#define WM_RELOAD_BACKGROUND   91
 #define WM_GET_BACKING_STORE  100
 #define WM_DAMAGE             102
 #define WM_SET_WINDOW_SURFACE_OPAQUE 112
