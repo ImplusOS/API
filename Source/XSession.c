@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "Error.h"
 #include "Graphics.h"
 #include "Input.h"
 #include "LinuxEnv.h"
@@ -598,7 +599,10 @@ static void manage(uint32_t xid)
 
     w->wid = window_create(w->w, w->h, title);
     if (w->wid == 0u) {
-        serial_write_string("[xsession] window_create failed\n");
+        char msg[64];
+        snprintf(msg, sizeof msg, "[xsession] window_create failed (errno %d)\n",
+                 os_get_errno());
+        serial_write_string(msg);
         return; /* left mapped on the X screen, unseen */
     }
     (void)window_set_close_policy(w->wid, true);
