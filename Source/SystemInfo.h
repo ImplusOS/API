@@ -125,12 +125,74 @@ typedef struct __attribute__((packed)) {
     uint64_t idle_ns[OS_CPU_USAGE_MAX_CORES];
 } system_cpu_usage_t;
 
+/*
+ * Cumulative I/O counters of one disk (the os_get_disk_info() numbering),
+ * kept by the kernel's block layer for every request that reaches the
+ * device -- block-cache hits are not counted. A rate, or the "active time"
+ * a task manager draws, is the difference of two samples over the
+ * difference of their timestamp_ns.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t timestamp_ns;   /* monotonic clock when sampled             */
+    uint64_t read_ops;
+    uint64_t write_ops;
+    uint64_t read_bytes;
+    uint64_t write_bytes;
+    uint64_t busy_ns;        /* time with at least one request in flight */
+    uint64_t read_ns;        /* sum of read request latencies            */
+    uint64_t write_ns;       /* sum of write request latencies           */
+    uint64_t errors;
+    uint32_t in_flight;
+    uint32_t reserved;
+} system_disk_stats_t;
+
+/* os_get_disk_stats() index for every disk together: ops and bytes summed,
+ * busy_ns = time any disk was busy. Needs no disk listing, so it is cheap
+ * even before the first os_get_disk_count() has finished probing. */
+#define SYSTEM_DISK_STATS_ALL 0xFFFFFFFFu
+
+/*
+ * GPU utilisation, per engine (Kernel/Source/Core/sysinfo/GpuStats.h). An
+ * engine is busy while it has work in flight; the GPU as a whole is as busy
+ * as its busiest engine. Cumulative, like the disk counters.
+ *   3D    render work (virgl command streams, 3D transfers, ...)
+ *   COPY  pixels on their way to scanout (2D transfers and flushes, or the
+ *         CPU framebuffer copies of a display without an engine)
+ * engine_flags: DEVICE = timed on the device by its driver, SOFTWARE = the
+ * display has no engine and the kernel timed the CPU copies; neither = the
+ * engine is not present.
+ */
+#define SYSTEM_GPU_ENGINE_3D    0u
+#define SYSTEM_GPU_ENGINE_COPY  1u
+#define SYSTEM_GPU_ENGINE_MAX   4u
+
+#define SYSTEM_GPU_ENGINE_FLAG_DEVICE   (1u << 0)
+#define SYSTEM_GPU_ENGINE_FLAG_SOFTWARE (1u << 1)
+
+typedef struct __attribute__((packed)) {
+    uint64_t timestamp_ns;
+    uint32_t engine_count;
+    uint32_t reserved;
+    uint32_t engine_flags[SYSTEM_GPU_ENGINE_MAX];
+    uint64_t engine_busy_ns[SYSTEM_GPU_ENGINE_MAX];
+    uint64_t engine_commands[SYSTEM_GPU_ENGINE_MAX];
+    uint64_t command_bytes;          /* 3D command-stream bytes submitted */
+    uint64_t fences_submitted;
+    uint64_t fences_retired;
+    uint64_t present_count;          /* display presents, every process   */
+    uint64_t present_bytes;
+    uint64_t shared_memory_bytes;    /* system memory held by GPU buffers */
+    uint64_t dedicated_memory_bytes; /* device-local memory, 0 if none    */
+} system_gpu_usage_t;
+
 int64_t os_get_cpu_info(system_cpu_info_t *out_info);
 int64_t os_get_cpu_usage(system_cpu_usage_t *out_usage);
 int64_t os_get_memory_info(system_memory_info_t *out_info);
 int64_t os_get_vmem_info(system_vmem_info_t *out_info);
 int64_t os_get_disk_count(uint32_t *out_count);
 int64_t os_get_disk_info(uint32_t index, system_disk_info_t *out_info);
+int64_t os_get_disk_stats(uint32_t index, system_disk_stats_t *out_stats);
+int64_t os_get_gpu_usage(system_gpu_usage_t *out_usage);
 int64_t os_raw_block_read(uint32_t disk_index, uint64_t lba, void *buffer, uint32_t sectors);
 int64_t os_raw_block_write(uint32_t disk_index, uint64_t lba, const void *buffer, uint32_t sectors);
 int64_t os_get_boot_font(void *buffer, uint64_t capacity);

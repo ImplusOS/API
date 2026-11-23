@@ -142,6 +142,36 @@ void theme_get_desktop(uint32_t *accent, bool *dark)
     if (dark) *dark = d;
 }
 
+/* `c` as a pure grey of the same brightness, alpha kept. */
+static uint32_t to_grey(uint32_t c)
+{
+    uint32_t l = luma(c);
+    return (c & 0xFF000000u) | (l << 16) | (l << 8) | l;
+}
+
+void theme_make_grey(theme_t *t)
+{
+    if (!t) return;
+    if (t->dark) {
+        t->accent    = 0xFFC8C8C8u;
+        t->on_accent = 0xFF111111u;
+        t->danger    = 0xFFB4B4B4u;
+        t->on_danger = 0xFF111111u;
+    } else {
+        t->accent    = 0xFF5F5F5Fu;
+        t->on_accent = 0xFFFFFFFFu;
+        t->danger    = 0xFF404040u;
+        t->on_danger = 0xFFFFFFFFu;
+    }
+    t->accent_soft = color_mix(t->surface, t->accent, t->dark ? 30u : 16u);
+
+    uint32_t *all[] = { &t->accent, &t->on_accent, &t->accent_soft, &t->bg,
+                        &t->surface, &t->surface_alt, &t->border, &t->text,
+                        &t->text_dim, &t->danger, &t->on_danger };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
+        *all[i] = to_grey(*all[i]);
+}
+
 void theme_load_desktop(theme_t *theme)
 {
     uint32_t accent;

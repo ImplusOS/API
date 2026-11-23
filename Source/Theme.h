@@ -66,6 +66,13 @@ void theme_get_desktop(uint32_t *accent, bool *dark);
 /* theme_init() with the desktop's accent and mode. */
 void theme_load_desktop(theme_t *theme);
 
+/* The shell's own palette, as the window manager draws it: the accent and
+ * the danger colour become fixed greys and every entry loses its hue, so
+ * only white and greys remain. Call after theme_init() / theme_load_desktop()
+ * -- an application that should look like part of the shell rather than
+ * carry the accent colour. */
+void theme_make_grey(theme_t *theme);
+
 /* `#RRGGBB`, `#AARRGGBB`, `0x...` or bare hex; `fallback` if malformed. */
 uint32_t theme_parse_color(const char *text, uint32_t fallback);
 

@@ -62,7 +62,26 @@ typedef struct {
     uint64_t display_bytes;
     uint64_t memory_usage;
     uint64_t page_fault_count;
+    /* Thread group: the process this task is a thread of, or its own pid.
+     * Add a thread's numbers to that process to get per-process figures. */
+    int32_t  owner_pid;
+    uint8_t  is_thread;
+    uint8_t  priority;           /* PROCESS_PRIORITY_*                     */
+    uint8_t  abi_mode;           /* PROCESS_ABI_* below                    */
+    uint8_t  reserved2;
+    uint64_t disk_read_bytes;    /* bytes its requests read from disks     */
+    uint64_t disk_write_bytes;
+    uint64_t gpu_3d_ns;          /* GPU 3D-engine time its work occupied   */
+    uint64_t gpu_copy_ns;        /* time its presents kept scanout busy    */
 } process_perf_info_t;
+
+/* process_perf_info_t.abi_mode (the kernel's PROCESS_ABI_*) */
+#ifndef PROCESS_ABI_IMPLUS
+#define PROCESS_ABI_IMPLUS      0u
+#define PROCESS_ABI_LINUX       1u   /* x86_64 Linux                       */
+#define PROCESS_ABI_LINUX_I386  2u
+#define PROCESS_ABI_LINUX_ARM64 3u
+#endif
 
 #define BOOT_PROFILE_NAME_MAX 32u
 typedef struct {
