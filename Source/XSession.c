@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "Error.h"
+#include "File.h"
 #include "Graphics.h"
 #include "Input.h"
 #include "LinuxEnv.h"
@@ -107,6 +108,46 @@ static int server_is_listening(uint32_t display)
     char path[48];
     snprintf(path, sizeof path, "/tmp/.X11-unix/X%u", display);
     return unix_socket_is_listening(path) > 0;
+}
+
+/* A server that was killed or crashed leaves /tmp/.X<n>-lock behind, holding
+ * its pid. Xorg treats the display as taken while any process has that pid,
+ * and pids are reused here within moments: the next server was often given
+ * the very same pid and then refused its own display ("Server is already
+ * active for display 0"), so every killed server cost a display number until
+ * reboot. Called only for a display nobody is listening on; the lock is kept
+ * when its pid is a live X server -- one another launcher is starting on
+ * this display right now (Xorg writes the pid before it links the lock into
+ * place, so a lock is never seen without one). */
+static void clear_stale_lock(uint32_t display)
+{
+    char path[48];
+    snprintf(path, sizeof path, "/tmp/.X%u-lock", display);
+    int32_t fd = file_open(path, 0);
+    if (fd < 0) return;
+    char text[16];
+    int64_t n = file_read(fd, text, sizeof text - 1u);
+    (void)file_close(fd);
+    if (n <= 0) return;
+    text[n] = '\0';
+    int32_t pid = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        if (text[i] >= '0' && text[i] <= '9') pid = pid * 10 + (text[i] - '0');
+        else if (pid != 0) break;
+    }
+    process_info_t info;
+    if (pid > 0 && get_process_info(pid, &info) >= 0 && info.pid == pid &&
+        info.state != 0u && info.state != 3u && info.state != 5u &&
+        strncmp(info.name, "Xorg", 4) == 0) {
+        return;
+    }
+    (void)file_unlink(path);
+    snprintf(path, sizeof path, "/tmp/.X11-unix/X%u", display);
+    (void)file_unlink(path);
+    char message[64];
+    snprintf(message, sizeof message, "[xsession] removed stale lock of :%u\n",
+             display);
+    serial_write_string(message);
 }
 
 /* 1 listening, 0 the server exited first (reaped), -1 timed out. */
@@ -268,6 +309,7 @@ int32_t xsession_open(xsession_t *session, const char *title,
      * before listening, and the loser moves on to the next. */
     for (uint32_t display = 0u; display < XSESSION_MAX_DISPLAYS; ++display) {
         if (server_is_listening(display)) continue;
+        clear_stale_lock(display);
         session->display = display;
         char args[192];
         snprintf(args, sizeof args, XORG_ARGS_FMT, display);
